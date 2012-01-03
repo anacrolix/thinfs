@@ -1,5 +1,6 @@
 #include <sys/stat.h>
 #include <stdbool.h>
+#include <sys/types.h>
 
 typedef int ThinfsErrno;
 typedef int ThinfsFd;
@@ -12,9 +13,10 @@ Thinfs *thinfs_mount(char const *path);
 void thinfs_unmount(Thinfs *);
 
 ThinfsCtx *thinfs_ctx_new(Thinfs *);
-bool thinfs_ctx_commit(ThinfsCtx *);
+ThinfsErrno thinfs_ctx_commit(ThinfsCtx *);
 void thinfs_ctx_free(ThinfsCtx *);
 
-ThinfsErrno thinfs_open(ThinfsCtx *, char const *path, ThinfsFd *);
+ThinfsFd thinfs_open(ThinfsCtx *, char const *path);
 ThinfsErrno thinfs_close(ThinfsCtx *, ThinfsFd fd);
 ThinfsErrno thinfs_fstat(ThinfsCtx *, ThinfsFd fd, struct stat *buf);
+ssize_t thinfs_readlink(ThinfsCtx *, const char *path, char *buf, size_t bufsize);

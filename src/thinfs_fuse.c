@@ -3,24 +3,26 @@
 
 typedef ThinfsCtx Ctx;
 
-Thinfs *get_fs() {
+static Thinfs *get_fs() {
     return fuse_get_context()->private_data;
 }
 
-int fuse_getattr(const char *path, struct stat *stat)
+static int thinfs_fuse_getattr(const char *path, struct stat *stat)
 {
     Ctx *ctx = thinfs_ctx_new(get_fs());
     ThinfsFd fd = thinfs_open(ctx, path);
-    ThinfsErrno e = thinfs_open(ctx, path, &fd);
-    if (e) return -e;
-    e = thinfs_fstat(ctx, fd, stat);
-    if (e) {
-        thinfs_close(ctx, fd);
-        return -e;
-    }
-    return -thinfs_close(ctx, fd);
+    thinfs_fstat(ctx, fd, stat);
+    return -thinfs_ctx_commit(ctx);
+}
+
+static int thinfs_fuse_readlink(const char *path, char *link, size_t size)
+{
+    Ctx *ctx = thinfs_ctx_new(get_fs());
+    thinfs_readlink(ctx, path, link, size);
+    return -thinfs_ctx_commit(ctx);
 }
 
 struct fuse_operations thinfs_fuse_operations = {
-    .getattr = fuse_getattr,
+    .getattr = thinfs_fuse_getattr,
+    .readlink = thinfs_fuse_readlink,
 };

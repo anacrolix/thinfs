@@ -1,6 +1,8 @@
+#include <limits.h>
 #include <stdint.h>
 
 typedef ThinfsCtx Ctx;
+typedef unsigned short Type;
 
 typedef struct {
     uint64_t block_count;
@@ -36,9 +38,15 @@ typedef struct {
 
 typedef struct {
     Ino ino;
+    char name[NAME_MAX];
+} Dentry;
+
+typedef struct {
+    Ino ino;
     Nlink nlink;
     Uid uid;
     Gid gid;
+    Type type;
     Time atime;
     Time mtime;
     Time ctime;

@@ -8,9 +8,12 @@
 #include <unistd.h>
 
 #define MAX_FDS 0x1000
+#define THINFS_IFDIR S_IFDIR
 
 typedef Thinfs Fs;
 typedef ThinfsCtx Ctx;
+typedef ThinfsFd Fd;
+typedef off_t Off;
 
 struct Thinfs {
     void *devbuf;
@@ -24,6 +27,11 @@ struct ThinfsCtx {
     Thinfs *fs;
     ThinfsErrno eno;
 };
+
+static void set_ctx_errno(Ctx *ctx, int eno)
+{
+    ctx->eno = eno;
+}
 
 bool thinfs_mkfs(int fd)
 {
@@ -89,17 +97,138 @@ Ctx *thinfs_ctx_new(Fs *fs)
     return ctx;
 }
 
-ThinfsErrno thinfs_open(ThinfsCtx *ctx, char const *path, ThinfsFd *fd)
+ThinfsErrno thinfs_ctx_commit(Ctx *ctx)
+{
+    return ctx->eno;
+}
+
+Fd thinfs_open(Ctx *ctx, char const *path)
+{
+    return -1;
+}
+
+ThinfsErrno thinfs_close(Ctx *ctx, Fd fd)
 {
     return EOPNOTSUPP;
 }
 
-ThinfsErrno thinfs_close(ThinfsCtx *ctx, ThinfsFd fd)
+ThinfsErrno thinfs_fstat(Ctx *ctx, ThinfsFd fd, struct stat *buf)
 {
     return EOPNOTSUPP;
 }
 
-ThinfsErrno thinfs_fstat(ThinfsCtx *ctx, ThinfsFd fd, struct stat *buf)
+static Off data_read_recurse(Ctx *ctx,
+
+static Off data_read(Ctx *ctx, Data *data, void *buf, size_t count, Off off)
 {
-    return EOPNOTSUPP;
+}
+
+static Off dir_read(Ctx *ctx, Inode *inode, Off off, Dentry *de)
+{
+    ssize_t got = data_read(ctx, data, sizeof *de, *off);
+    switch (got) {
+        case -1: return -1;
+        case 0: return 0;
+        default: return off + got;
+    }
+}
+
+static bool inode_is_dir(Inode *inode)
+{
+    return inode->type == THINFS_IFDIR;
+}
+
+static void *get_block(Ctx *ctx, Blkno blkno)
+{
+    return ctx->fs->devbuf + blkno * ctx->fs->geo->block_size;
+}
+
+static Inode *get_inode(Ctx *ctx, Ino ino)
+{
+    Inode *inode = get_block(ctx, ino);
+    if (inode->ino != ino) {
+        set_ctx_errno(ctx, EIO);
+        return NULL;
+    }
+    return inode;
+}
+
+static Ino find_entry(Ctx *ctx, Ino ino, char const *name, size_t size)
+{
+    Inode *inode = get_inode(ctx, ino);
+    if (!inode) return -1;
+    Off off = 0;
+    while (true) {
+        Entry de[1];
+        off = dir_read(ctx, inode, off, de);
+        if (off == -1) return -1;
+        if (off == 0) {
+            ctx_set_errno(ENOENT);
+            return -1;
+        }
+        if (!ino_valid(ctx, de->ino) || !*de->name) {
+            ctx_set_errno(EIO);
+            return -1;
+        }
+        if (strnlen(de->name, NAME_MAX) != size)
+            continue;
+        if (!memcmp(de->name, name, size))
+            return de->ino;
+    }
+}
+
+static Ino root_ino(Ctx *ctx)
+{
+    return ctx->fs->geo->data_start;
+}
+
+typedef struct {
+    char const *name;
+    size_t size;
+} PathIter;
+
+static PathIter path_iter_next(PathIter pi)
+{
+    pi.name += size;
+    pi.size = 0;
+    switch (*pi.name) {
+        case '/':
+        pi.name += 1;
+        pi.size = strchrnul(pi.name, '/') - pi.name;
+        break;
+        case '\0':
+        pi.name = NULL;
+        break;
+    }
+    return pi;
+}
+
+static PathIter iter_path(char const *path)
+{
+    return (PathIter) {
+        .name = *path == '/' ? path : NULL;
+        .size = 0;
+    }
+}
+
+static Ino path_to_ino(Ctx *ctx, char const *path)
+{
+    PathIter pi = iter_path(path);
+    if (!pi.name) {
+        set_ctx_errno(EINVAL);
+        return -1;
+    }
+    Ino ino = root_ino();
+    while (true) {
+        pi = path_iter_next(pi);
+        if (!pi.name) break;
+        ino = find_entry(ctx, ino, pi.name, pi.size);
+        if (ino == -1) return -1;
+    }
+    return ino;
+}
+
+ssize_t thinfs_readlink(Ctx *ctx, char const *path, char *buf, size_t bufsize)
+{
+
 }
