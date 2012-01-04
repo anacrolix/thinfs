@@ -182,14 +182,9 @@ void *thinfs_fuse_init(struct fuse_conn_info *conn)
     return get_fs();
 }
 
-void *thinfs_fuse_destroy(void *data)
+void thinfs_fuse_destroy(void *data)
 {
     thinfs_unmount(data);
-}
-
-int thinfs_fuse_access(char const *path, int mask)
-{
-    return -thinfs_access(get_fs(), path, mask, get_uid(), get_gid());
 }
 
 int thinfs_fuse_create(char const *path, mode_t mode, struct fuse_file_info *ffi)
@@ -225,8 +220,9 @@ struct fuse_operations thinfs_fuse_operations = {
     .rmdir = thinfs_fuse_rmdir,
     .symlink = thinfs_fuse_symlink,
     .rename = thinfs_fuse_rename,
-    .link = thinfs_fuse_rename,
+    .link = thinfs_fuse_link,
     .chmod = thinfs_fuse_chmod,
+    .chown = thinfs_fuse_chown,
     .truncate = thinfs_fuse_truncate,
     // .utime deprecated by utimens
     .open = thinfs_fuse_open,

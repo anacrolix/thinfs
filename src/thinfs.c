@@ -31,12 +31,13 @@ struct Thinfs {
     void *devbuf;
     Geometry geo[1];
     int devfd;
-    int fds[MAX_FDS];
+    Ino fds[MAX_FDS];
 };
 
 typedef struct {
     Thinfs *fs;
     ThinfsErrno eno;
+    Time time;
 } Ctx;
 
 static void set_ctx_errno(Ctx *ctx, int eno)
@@ -44,7 +45,7 @@ static void set_ctx_errno(Ctx *ctx, int eno)
     ctx->eno = eno;
 }
 
-static void const *get_block(Ctx *ctx, Blkno blkno)
+static void *get_block(Ctx *ctx, Blkno blkno)
 {
     if (!(0 <= blkno && blkno < ctx->fs->geo->block_count)) {
         set_ctx_errno(ctx, EIO);
@@ -109,9 +110,9 @@ void thinfs_unmount(Thinfs *fs)
     free(fs);
 }
 
-static Inode const *inode_get(Ctx *ctx, Ino ino)
+static Inode *inode_get(Ctx *ctx, Ino ino)
 {
-    Inode const *inode = get_block(ctx, ino);
+    Inode *inode = get_block(ctx, ino);
     if (!inode) return NULL;
     if (inode->ino != ino) {
         fprintf(stderr, "inode %" PRIINO " is corrupted\n", ino);
@@ -174,6 +175,16 @@ static Time time_from_timespec(struct timespec ts)
     };
 }
 
+static Time ctx_time(Ctx *ctx)
+{
+    if (ctx->time.secs == -1) {
+        struct timespec ts[1];
+        clock_gettime(CLOCK_REALTIME, ts);
+        ctx->time = time_from_timespec(*ts);
+    }
+    return ctx->time;
+}
+
 static uint64_t depth_capacity(Ctx *ctx, Depth depth)
 {
     uint64_t cap = ctx->fs->geo->block_size;
@@ -226,7 +237,7 @@ static ssize_t data_read(Ctx *ctx, Data const *data, void *buf, size_t count, Of
 
 static bool inode_is_dir(Inode const *inode)
 {
-    return inode->type == THINFS_IFDIR;
+    return S_ISDIR(inode->mode);
 }
 
 static ssize_t inode_read(Ctx *ctx, Inode const *inode, void *buf, size_t count, Off off)
@@ -315,6 +326,21 @@ static Fd fd_new(Ctx *ctx, Ino ino)
     return -1;
 }
 
+static bool fd_free(Ctx *ctx, Fd fd)
+{
+    if (fd < 0 || fd >= MAX_FDS) {
+        set_ctx_errno(ctx, EBADF);
+        return false;
+    }
+    Ino *ino = &ctx->fs->fds[fd];
+    if (*ino == -1) {
+        set_ctx_errno(ctx, EBADF);
+        return false;
+    }
+    *ino = -1;
+    return true;
+}
+
 ssize_t thinfs_readlink(Fs *fs, char const *path, char *buf, size_t bufsize)
 {
     Ctx ctx[1] = {ctx_open(fs)};
@@ -337,17 +363,12 @@ Fd thinfs_open(Fs *fs, char const *path)
     return -ctx_close(ctx) || fd;
 }
 
-ThinfsErrno thinfs_close(Fs *fs, Fd fd)
-{
-    return EOPNOTSUPP;
-}
-
 static struct stat inode_to_stat(Ctx *ctx, Inode const *inode)
 {
     return (struct stat) {
         .st_ino = inode->ino,
         .st_nlink = inode->nlink,
-        .st_mode = inode->perms | inode->type << 12,
+        .st_mode = inode->mode,
         .st_uid = inode->uid,
         .st_gid = inode->gid,
         .st_rdev = inode->rdev,
@@ -405,8 +426,7 @@ bool thinfs_mkfs(int fd)
     *(Inode *)(buf + geo.block_size * geo.bitmap_blocks) = (Inode) {
         .ino = geo.data_start,
         .nlink = 2,
-        .type = THINFS_IFDIR,
-        .perms = 0755,
+        .mode = S_IFDIR|0755,
         .file_data = {{.root = -1}},
         .atime = time,
         .mtime = time,
@@ -415,5 +435,181 @@ bool thinfs_mkfs(int fd)
     munmap(buf, geo.block_size * geo.data_start);
     munmap(mbr, pagesize);
     return true;
+}
+
+ThinfsErrno thinfs_chmod(Thinfs *fs, char const *path, mode_t mode)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    Inode *inode = inode_get(ctx, ino_from_path(ctx, path));
+    if (!inode) goto done;
+    inode->mode &= ~07777;
+    inode->mode |= mode & 07777;
+    inode->ctime = ctx_time(ctx);
+done:
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_chown(Thinfs *fs, char const *path, uid_t uid, gid_t gid)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    Inode *inode = inode_get(ctx, ino_from_path(ctx, path));
+    if (!inode) goto done;
+    if (uid == -1 && gid == -1) goto done;
+    if (uid != -1) inode->uid = uid;
+    if (gid != -1) inode->gid = gid;
+    inode->ctime = ctx_time(ctx);
+done:
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_close(Thinfs *fs, ThinfsFd fd)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    fd_free(ctx, fd);
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_create(Thinfs *fs, char const *path, mode_t mode, uid_t uid, gid_t gid)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_fsyncdir(Thinfs *fs, ThinfsFd fd, int dataonly)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_link(Thinfs *fs, char const *target, char const *path)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_mkdir(Thinfs *fs, char const *path, mode_t mode, uid_t uid, gid_t gid)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_mknod(Thinfs *fs, char const *path, mode_t mode, dev_t dev, uid_t uid, gid_t gid)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_pread(Thinfs *fs, ThinfsFd fd, void *buf, size_t count, off_t off)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_pwrite(Thinfs *fs, ThinfsFd fd, void const *buf, size_t count, off_t off)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_unlink(Thinfs *fs, char const *path)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_rename(Thinfs *fs, char const *oldpath, char const *newpath)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_rmdir(Thinfs *fs, char const *path)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_symlink(Thinfs *fs, char const *target, char const *path)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_truncate(Thinfs *fs, char const *path, off_t size)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_statvfs(Thinfs *fs, struct statvfs *buf)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_flush(Thinfs *fs, ThinfsFd fd)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_fsync(Thinfs *fs, ThinfsFd fd, int dataonly)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_setxattr(Thinfs *fs, char const *path, char const *name, char const *value, size_t size, int flags)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ssize_t thinfs_getxattr(Thinfs *fs, char const *path, char const *name, char *value, size_t size)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ssize_t thinfs_listxattr(Thinfs *fs, char const *path, char *list, size_t size)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_removexattr(Thinfs *fs, char const *path, char const *name)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_opendir(Thinfs *fs, char const *path)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_readdir(Thinfs *fs, ThinfsFd fd, void *data, ThinfsFillDir filler, off_t off)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_releasedir(Thinfs *fs, ThinfsFd fd)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_ftruncate(Thinfs *fs, ThinfsFd fd, off_t len)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
+}
+
+ThinfsErrno thinfs_utimens(Thinfs *fs, char const *path, const struct timespec tv[2])
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    return ctx_close(ctx);
 }
 

@@ -1,6 +1,7 @@
 #include <sys/stat.h>
 #include <stdbool.h>
 #include <sys/types.h>
+#include <sys/statvfs.h>
 
 typedef int ThinfsErrno;
 typedef int ThinfsFd;
@@ -12,7 +13,6 @@ bool thinfs_mkfs(int fd);
 Thinfs *thinfs_mount(char const *path);
 void thinfs_unmount(Thinfs *);
 
-ThinfsErrno thinfs_access(Thinfs *, char const *path, int mode);
 ThinfsErrno thinfs_chmod(Thinfs *, char const *path, mode_t mode);
 ThinfsErrno thinfs_chown(Thinfs *, char const *path, uid_t uid, gid_t gid);
 ThinfsErrno thinfs_close(Thinfs *, ThinfsFd fd);

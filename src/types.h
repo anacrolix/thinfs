@@ -2,8 +2,7 @@
 #include <limits.h>
 #include <stdint.h>
 
-typedef unsigned short Type;
-typedef unsigned short Perms;
+typedef uint32_t Mode;
 typedef int64_t Blkno;
 #define PRIBLKNO PRIu64
 typedef Blkno Ino;
@@ -50,8 +49,7 @@ typedef struct {
 typedef struct {
     Ino ino;
     Nlink nlink;
-    Type type;
-    Perms perms;
+    Mode mode;
     Uid uid;
     Gid gid;
     Rdev rdev;
