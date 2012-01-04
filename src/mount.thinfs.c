@@ -34,7 +34,7 @@ int main(int argc, char *argv[])
     fprintf(stderr, "arguments to fuse main:\n");
     for (int i = 0; i < fuse_args.argc; ++i)
         fprintf(stderr, "\t%s\n", fuse_args.argv[i]);
-    if (0 != fuse_main(fuse_args.argc, fuse_args.argv, &thinfs_fuse_operations, NULL)) {
+    if (0 != fuse_main(fuse_args.argc, fuse_args.argv, &thinfs_fuse_operations, fs)) {
         fprintf(stderr, "fuse main returned error\n");
         return 1;
     }

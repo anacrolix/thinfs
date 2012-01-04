@@ -18,4 +18,4 @@ gcc \
     -o mkfs.thinfs \
     -I../include -D_GNU_SOURCE \
     $CFLAGS \
-    mkfs.thinfs.c thinfs.c
+    mkfs.thinfs.c thinfs.c -lrt
