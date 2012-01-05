@@ -27,7 +27,10 @@ typedef struct {
     uint64_t bitmap_density;
     uint64_t block_count;
     long page_size;
-} Geometry;
+    Blkno entries_per_block;
+    off_t entry_size;
+    Blkno indirect_density;
+} Geo;
 
 typedef struct {
     uint64_t secs;
@@ -43,8 +46,11 @@ typedef struct {
 
 typedef struct {
     Ino ino;
+    uint8_t namelen;
     char name[NAME_MAX];
 } Entry;
+
+_Static_assert(NAME_MAX <= UINT8_MAX, "namelen is too small");
 
 typedef struct {
     Ino ino;

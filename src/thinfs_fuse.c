@@ -118,25 +118,25 @@ int thinfs_fuse_fsync(char const *path, int dataonly, struct fuse_file_info *ffi
     return -thinfs_fsync(get_fs(), ffi->fh - 1, dataonly);
 }
 
-int thinfs_fuse_setxattr(char const *path, char const *name, char const *value, size_t size, int flags)
-{
-    return -thinfs_setxattr(get_fs(), path, name, value, size, flags);
-}
-
-int thinfs_fuse_getxattr(char const *path, char const *name, char *value, size_t size)
-{
-    return thinfs_getxattr(get_fs(), path, name, value, size);
-}
-
-int thinfs_fuse_listxattr(char const *path, char *list, size_t size)
-{
-    return thinfs_listxattr(get_fs(), path, list, size);
-}
-
-int thinfs_fuse_removexattr(char const *path, char const *name)
-{
-    return -thinfs_removexattr(get_fs(), path, name);
-}
+//~ int thinfs_fuse_setxattr(char const *path, char const *name, char const *value, size_t size, int flags)
+//~ {
+    //~ return -thinfs_setxattr(get_fs(), path, name, value, size, flags);
+//~ }
+//~
+//~ int thinfs_fuse_getxattr(char const *path, char const *name, char *value, size_t size)
+//~ {
+    //~ return thinfs_getxattr(get_fs(), path, name, value, size);
+//~ }
+//~
+//~ int thinfs_fuse_listxattr(char const *path, char *list, size_t size)
+//~ {
+    //~ return thinfs_listxattr(get_fs(), path, list, size);
+//~ }
+//~
+//~ int thinfs_fuse_removexattr(char const *path, char const *name)
+//~ {
+    //~ return -thinfs_removexattr(get_fs(), path, name);
+//~ }
 
 int thinfs_fuse_opendir(char const *path, struct fuse_file_info *ffi)
 {
@@ -232,10 +232,10 @@ struct fuse_operations thinfs_fuse_operations = {
     .flush = thinfs_fuse_flush,
     .release = thinfs_fuse_release,
     .fsync = thinfs_fuse_fsync,
-    .setxattr = thinfs_fuse_setxattr,
-    .getxattr = thinfs_fuse_getxattr,
-    .listxattr = thinfs_fuse_listxattr,
-    .removexattr = thinfs_fuse_removexattr,
+    //~ .setxattr = thinfs_fuse_setxattr,
+    //~ .getxattr = thinfs_fuse_getxattr,
+    //~ .listxattr = thinfs_fuse_listxattr,
+    //~ .removexattr = thinfs_fuse_removexattr,
     .opendir = thinfs_fuse_opendir,
     .readdir = thinfs_fuse_readdir,
     .releasedir = thinfs_fuse_releasedir,

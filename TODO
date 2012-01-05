@@ -1,2 +1,7 @@
  * mount with direct_io
  * specify or not default permissions?
+ * make use of the partial byte in the bitmap
+ * implement access even if it's not used, it seems to be recommended
+ * set during init: max write, atomic open trunc, export support, big writes
+ * wrap xattr funcs in HAVE_SETXATTR
+ * mark pure functions and check repeat calls to them are optimized
