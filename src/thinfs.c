@@ -40,12 +40,12 @@ struct Thinfs {
 };
 
 typedef struct {
-    Thinfs const *fs;
+    Thinfs *fs;
     ThinfsErrno eno;
     Time time;
-    GTree *dirty;
-    Fd fd;
-    Ino fd_ino;
+    //~ GTree *dirty;
+    //~ Fd fd;
+    //~ Ino fd_ino;
 } Ctx;
 
 typedef struct {
@@ -163,43 +163,28 @@ static bool blkno_valid(Ctx *ctx, Blkno blkno)
     return 0 <= blkno && blkno < ctx_geo(ctx)->block_count;
 }
 
-static void const *block_get_ro(Ctx *ctx, Blkno blkno)
+static void *bitmap_get(Ctx *ctx)
 {
-    if (!blkno_valid(ctx, blkno)) return NULL;
-    return ctx->fs->devbuf + blkno * ctx_geo(ctx)->block_size;
+    return ctx->fs->devbuf + ctx_geo(ctx)->bitmap_start * ctx_geo(ctx)->block_size;
+}
+
+static bool bitmap_isset(Ctx *ctx, Blkno blkno)
+{
+    blkno -= ctx_geo(ctx)->data_start;
+    if (!(0 <= blkno && blkno < ctx_geo(ctx)->data_blocks)) abort();
+    return (((char *)bitmap_get(ctx))[blkno / CHAR_BIT] >> (blkno % CHAR_BIT)) & 1;
 }
 
 static void *block_get(Ctx *ctx, Blkno blkno)
 {
-    gpointer block = g_tree_lookup(ctx->dirty, (gconstpointer)blkno);
-    if (block) return block;
-    block = malloc(ctx_geo(ctx)->block_size);
-    memcpy(block, block_get_ro(ctx, blkno), ctx_geo(ctx)->block_size);
-    g_tree_insert(ctx->dirty, (gpointer)blkno, block);
-    return block;
-}
-
-static void *block_replace(Ctx *ctx, Blkno blkno)
-{
-    gpointer block = g_tree_lookup(ctx->dirty, (gconstpointer)blkno);
-    if (block) return block;
-    block = malloc(ctx_geo(ctx)->block_size);
-    g_tree_insert(ctx->dirty, (gpointer)blkno, block);
-    return block;
-}
-
-static void block_dirty(Ctx *ctx, Blkno blkno)
-{
-    if (g_tree_lookup(ctx->dirty, (gconstpointer)blkno)) return;
-    gpointer block = malloc(ctx_geo(ctx)->block_size);
-    memcpy(block, ctx->fs->devbuf + blkno * ctx_geo(ctx)->block_size, ctx_geo(ctx)->block_size);
-    g_tree_insert(ctx->dirty, (gpointer)blkno, block);
+    //~ if (!bitmap_isset(ctx, blkno)) return NULL;
+    return ctx->fs->devbuf + blkno * ctx_geo(ctx)->block_size;
 }
 
 ssize_t block_read(Ctx *ctx, Blkno blkno, void *buf, size_t count, Off off)
 {
     count = MAX(0, MIN(count, ctx_geo(ctx)->block_size - off));
-    void const *block = block_get_ro(ctx, blkno);
+    void const *block = block_get(ctx, blkno);
     memcpy(buf, block + off, count);
     return count;
 }
@@ -245,7 +230,7 @@ Thinfs *thinfs_mount(char const *path)
     MBR *mbr = mmap(NULL, pagesize, PROT_READ, MAP_SHARED, fs->devfd, 0);
     *fs->geo = geo_from_mbr(mbr);
     munmap(mbr, pagesize);
-    fs->devbuf = mmap(NULL, fs->geo->block_size * fs->geo->block_count, PROT_READ, MAP_SHARED, fs->devfd, 0);
+    fs->devbuf = mmap(NULL, fs->geo->block_size * fs->geo->block_count, PROT_READ|PROT_WRITE, MAP_SHARED, fs->devfd, 0);
     return fs;
 failed:
     thinfs_unmount(fs);
@@ -279,25 +264,13 @@ static Inode *inode_get(Ctx *ctx, Ino ino)
 
 static Blkno block_alloc(Ctx *ctx)
 {
-    for (size_t i = 0; i < ctx_geo(ctx)->bitmap_blocks; ++i) {
-        Blkno bitmap_blkno = ctx_geo(ctx)->bitmap_start + i;
-        char *block = block_get(ctx, bitmap_blkno);
-        for (size_t j = 0; j < ctx_geo(ctx)->bitmap_density / CHAR_BIT; ++j) {
-            char byte = block[j];
-            if (byte == -1) continue;
-            for (int k = 0; k < CHAR_BIT; ++k) {
-                if (!((byte >> k) & 1)) {
-                    Blkno blkno = i * ctx_geo(ctx)->bitmap_density + j * CHAR_BIT + k;
-                    if (blkno >= ctx_geo(ctx)->data_blocks) goto no_space;
-                    block_dirty(ctx, bitmap_blkno);
-                    block = block_get(ctx, bitmap_blkno);
-                    block[j] |= 1 << k;
-                    return ctx_geo(ctx)->data_start + blkno;
-                }
-            }
+    char *bitmap = bitmap_get(ctx);
+    for (size_t bit = 0; bit < ctx_geo(ctx)->data_blocks; ++bit) {
+        if (!((bitmap[bit / CHAR_BIT] >> (bit % CHAR_BIT)) & 1)) {
+            bitmap[bit / CHAR_BIT] |= 1 << (bit % CHAR_BIT);
+            return ctx_geo(ctx)->data_start + bit;
         }
     }
-no_space:
     ctx_set_errno(ctx, ENOSPC);
     return -1;
 }
@@ -316,7 +289,7 @@ static Inode *inode_new(Ctx *ctx, mode_t mode, dev_t rdev, uid_t uid, gid_t gid)
 {
     Ino ino = block_alloc(ctx);
     if (ino == -1) return NULL;
-    Inode *inode = block_replace(ctx, ino);
+    Inode *inode = block_get(ctx, ino);
     *inode = (Inode) {
         .ino = ino,
         .nlink = 1 ? S_ISDIR(mode) : 0,
@@ -334,10 +307,10 @@ static Inode *inode_new(Ctx *ctx, mode_t mode, dev_t rdev, uid_t uid, gid_t gid)
 
 _Static_assert(sizeof(gconstpointer) >= sizeof(Blkno), "Blkno too large to be GTree key");
 
-static gint ctx_dirty_compare_data(gconstpointer a, gconstpointer b, gpointer data)
-{
-    return (Blkno)a - (Blkno)b;
-}
+//~ static gint ctx_dirty_compare_data(gconstpointer a, gconstpointer b, gpointer data)
+//~ {
+    //~ return (Blkno)a - (Blkno)b;
+//~ }
 
 Ctx ctx_open(Fs *fs)
 {
@@ -347,33 +320,33 @@ Ctx ctx_open(Fs *fs)
             .secs = -1,
             .nanos = -1,
         },
-        .dirty = g_tree_new_full(ctx_dirty_compare_data, NULL, NULL, free),
-        .fd = -1,
-        .fd_ino = -1,
+        //~ .dirty = g_tree_new_full(ctx_dirty_compare_data, NULL, NULL, free),
+        //~ .fd = -1,
+        //~ .fd_ino = -1,
     };
 }
 
 Errno ctx_close(Ctx *ctx)
 {
-    Fs *fs = (Fs *)ctx->fs;
+    //~ Fs *fs = (Fs *)ctx->fs;
     if (!ctx->eno) {
-        if (ctx->fd != -1) {
-            Ino *ino = &fs->fds[ctx->fd];
-            if (*ino != -1) inode_unref(ctx, inode_get(ctx, *ino));
-            *ino = ctx->fd_ino;
-        }
-        size_t block_size = ctx_geo(ctx)->block_size;
-        gboolean func(gpointer key, gpointer value, gpointer data) {
-            Blkno blkno = (Blkno)key;
-            if (block_size != pwrite(ctx->fs->devfd, value, block_size, blkno * block_size)) {
-                perror("pwrite");
-                abort();
-            }
-            return FALSE;
-        }
-        g_tree_foreach(ctx->dirty, func, NULL);
+        //~ if (ctx->fd != -1) {
+            //~ Ino *ino = &fs->fds[ctx->fd];
+            //~ if (*ino != -1) inode_unref(ctx, inode_get(ctx, *ino));
+            //~ *ino = ctx->fd_ino;
+        //~ }
+        //~ size_t block_size = ctx_geo(ctx)->block_size;
+        //~ gboolean func(gpointer key, gpointer value, gpointer data) {
+            //~ Blkno blkno = (Blkno)key;
+            //~ if (block_size != pwrite(ctx->fs->devfd, value, block_size, blkno * block_size)) {
+                //~ perror("pwrite");
+                //~ abort();
+            //~ }
+            //~ return FALSE;
+        //~ }
+        //~ g_tree_foreach(ctx->dirty, func, NULL);
     }
-    g_tree_destroy(ctx->dirty);
+    //~ g_tree_destroy(ctx->dirty);
     return ctx->eno;
 }
 
@@ -421,7 +394,7 @@ static blkcnt_t data_blocks(Ctx *ctx, Data const *data)
             return 0;
         if (depth == 0)
             return 1;
-        Blkno const *indirect = block_get_ro(ctx, blkno);
+        Blkno const *indirect = block_get(ctx, blkno);
         blkcnt_t blocks = 1;
         for (int i = 0; i < ctx->fs->geo->bitmap_density; ++i)
             blocks += recurse(indirect[i], depth - 1);
@@ -465,7 +438,7 @@ static Blkno data_bmap(Ctx *ctx, Data *data, Blkno index)
     Blkno recurse(Blkno blkno, Depth depth, Blkno index) {
         if (depth == 0 && index == 0) return blkno;
         Blkno cap = depth_capacity_blocks(ctx, depth);
-        Blkno const *indirect = block_get_ro(ctx, blkno);
+        Blkno const *indirect = block_get(ctx, blkno);
         return recurse(indirect[index / cap], depth - 1, index % cap);
     }
     if (index >= depth_capacity_blocks(ctx, data->depth)) return -1;
@@ -473,82 +446,82 @@ static Blkno data_bmap(Ctx *ctx, Data *data, Blkno index)
 }
 
 // return number of bytes read, or -1 on error
-static ssize_t data_read(Ctx *ctx, Data const *data, void *buf, size_t count, Off off)
+static size_t data_read(Ctx *ctx, Data const *data, void *buf, size_t count, Off off)
 {
-    bool recurse(Blkno blkno, Depth depth, void *buf, size_t count, Off off) {
+    void recurse(Blkno blkno, Depth depth, void *buf, size_t count, Off off) {
         if (blkno == -1) {
             memset(buf, 0, count);
-            return true;
+            return;
         }
         if (depth == 0) {
-            return count == block_read(ctx, blkno, buf, count, off);
+            if (count != block_read(ctx, blkno, buf, count, off)) abort();
+            return;
         }
-        Blkno const *indirect = block_get_ro(ctx, blkno);
+        Blkno const *indirect = block_get(ctx, blkno);
         uint64_t childcap = depth_capacity_bytes(ctx, depth);
         indirect += off / childcap;
         off %= childcap;
         while (count != 0) {
-            size_t subcount = MIN(count, childcap - off);
-            if (!recurse(*indirect, depth-1, buf, subcount, off))
-                return false;
-            count -= subcount;
+            size_t childcnt = MIN(count, childcap - off);
+            recurse(*indirect, depth-1, buf, childcnt, off);
+            count -= childcnt;
             off = 0;
+            buf += childcnt;
+            indirect++;
         }
-        return count == 0;
     }
     count = MIN(count, MAX(data->size - off, 0));
-    uint64_t tree_cap = depth_capacity_bytes(ctx, data->depth);
-    uint64_t tree_count = MIN(count, MAX(tree_cap - off, 0));
-    if (!recurse(data->root, data->depth - 1, buf, tree_count, off))
-        return -1;
-    if (count > tree_count)
-        memset(buf + tree_count, 0, count - tree_count);
+    uint64_t treecap = depth_capacity_bytes(ctx, data->depth);
+    uint64_t treecnt = MIN(count, MAX(treecap - off, 0));
+    recurse(data->root, data->depth - 1, buf, treecnt, off);
+    if (count > treecnt)
+        memset(buf + treecnt, 0, count - treecnt);
     return count;
 }
 
-static Off data_lengthen(Ctx *ctx, Data *data, Off len)
+static bool data_lengthen(Ctx *ctx, Data *data, Off len)
 {
     while (depth_capacity_bytes(ctx, data->depth) < len) {
         Blkno new_root = block_alloc(ctx);
-        if (new_root == -1) return -1;
-        Blkno *indirect = block_replace(ctx, new_root);
+        if (new_root == -1) return false;
+        Blkno *indirect = block_get(ctx, new_root);
         memset(indirect, -1, ctx_geo(ctx)->block_size);
         *indirect = data->root;
         data->root = new_root;
         data->depth++;
     }
-    return len;
+    return true;
 }
 
 static bool data_shorten(Ctx *ctx, Data *data, Off len)
 {
-    bool recurse(Blkno blkno, Depth depth, Off len) {
-        Blkno *indirect = block_get(ctx, blkno);
-        if (!indirect) return false;
-        Blkno *indirect_end = indirect + ctx_geo(ctx)->indirect_density;
-        indirect += len / depth_capacity_bytes(ctx, depth - 1);
-        len %= depth_capacity_bytes(ctx, depth - 1);
-        for (; indirect < indirect_end; indirect++) {
-            if (!recurse(*indirect, depth - 1, len))
-                return false;
-            if (len == 0) *indirect = -1;
-            len = 0;
+    Blkno recurse(Blkno blkno, Depth depth, Off len) {
+        if (blkno == -1) return -1;
+        if (depth > 0) {
+            Blkno *indirect = block_get(ctx, blkno);
+            Blkno *indirect_end = indirect + ctx_geo(ctx)->indirect_density;
+            indirect += len / depth_capacity_bytes(ctx, depth);
+            Off childlen = len % depth_capacity_bytes(ctx, depth);
+            for (; indirect < indirect_end; indirect++) {
+                *indirect = recurse(*indirect, depth - 1, childlen);
+                childlen = 0;
+            }
         }
-        return true;
+        if (len == 0) {
+            block_free(ctx, blkno);
+            blkno = -1;
+        }
+        return blkno;
     }
-    if (!recurse(data->root, data->depth, len))
-        return false;
-    while (data->depth > 1 && depth_capacity_bytes(ctx, data->depth - 1) >= len) {
-        Blkno *indirect = block_get(ctx, data->root);
-        Blkno new_root = indirect[0];
-        block_free(ctx, data->root);
-        data->root = new_root;
+    data->root = recurse(data->root, data->depth - 1, len);
+    while (data->depth && depth_capacity_bytes(ctx, data->depth - 1) >= len) {
+        if (data->root != -1) {
+            Blkno *indirect = block_get(ctx, data->root);
+            Blkno new_root = indirect[0];
+            block_free(ctx, data->root);
+            data->root = new_root;
+        }
         data->depth--;
-    }
-    if (len == 0) {
-        if (!block_free(ctx, data->root)) return false;
-        data->root = -1;
-        data->depth = 0;
     }
     data->size = len;
     return true;
@@ -561,36 +534,39 @@ static bool data_truncate(Ctx *ctx, Data *data, Off len)
     return true;
 }
 
-static ssize_t data_write(Ctx *ctx, Data *data, void const *buf, size_t count, Off off)
+static size_t data_write(Ctx *ctx, Data *data, void const *buf, size_t count, Off off)
 {
-    if (-1 == data_lengthen(ctx, data, off + count)) return -1;
-    bool recurse(Blkno blkno, Depth depth, void const *buf, size_t count, Off off) {
+    if (!data_lengthen(ctx, data, off + count)) return 0;
+    size_t recurse(Blkno blkno, Depth depth, void const *buf, size_t count, Off off) {
         if (depth == 0) {
             void *block = block_get(ctx, blkno);
             memcpy(block + off, buf, count);
-            return true;
+            return count;
         }
         Blkno *indirect = block_get(ctx, blkno);
-        Off childcap = depth_capacity_bytes(ctx, depth - 1);
+        Off childcap = depth_capacity_bytes(ctx, depth);
         indirect += off / childcap;
         off %= childcap;
+        ssize_t nwrite = 0;
         while (count != 0) {
             if (*indirect == -1) {
                 *indirect = block_alloc(ctx);
-                if (*indirect == -1) return false;
+                if (*indirect == -1) return nwrite;
             }
-            Off subcount = MIN(count, childcap - off);
-            if (subcount != recurse(*indirect, depth - 1, buf, subcount, off)) return -1;
-            count -= subcount;
+            Off childcnt = MIN(count, childcap - off);
+            size_t childret = recurse(*indirect, depth - 1, buf, childcnt, off);
+            nwrite += childret;
+            if (childret != childcnt) return nwrite;
+            buf += childcnt;
+            count -= childcnt;
             off = 0;
             indirect++;
         }
-        return true;
+        return nwrite;
     }
-    if (!recurse(data->root, data->depth - 1, buf, count, off))
-        return -1;
-    data->size = MAX(data->size, off + count);
-    return count;
+    size_t nwrite = recurse(data->root, data->depth - 1, buf, count, off);
+    data->size = MAX(data->size, off + nwrite);
+    return nwrite;
 }
 
 static bool inode_is_dir(Inode const *inode)
@@ -605,7 +581,7 @@ static ssize_t inode_read(Ctx *ctx, Inode const *inode, void *buf, size_t count,
 
 static ssize_t inode_write(Ctx *ctx, Inode *inode, void const *buf, size_t count, Off off)
 {
-    ssize_t nwrite = data_write(ctx, inode_file_data(inode), buf, count, off);
+    size_t nwrite = data_write(ctx, inode_file_data(inode), buf, count, off);
     if (nwrite > 0) {
         inode->ctime = ctx_time(ctx);
         inode->mtime = ctx_time(ctx);
@@ -706,13 +682,9 @@ static Off dir_add(Ctx *ctx, Inode *dir, Path name, Inode *inode)
     memcpy(entry.name, name.s, name.n);
     entry.name[name.n] = '\0';
     size_t entry_size = ctx_geo(ctx)->entry_size;
-    ssize_t written = data_write(ctx, inode_file_data(dir), &entry, entry_size, entries * entry_size);
-    if (written == -1) return -1;
-    if (written != entry_size) {
-        fprintf(stderr, "partial directory write\n");
-        ctx_set_errno(ctx, EIO);
-        return -1;
-    }
+    size_t written = data_write(ctx, inode_file_data(dir), &entry, entry_size, entries * entry_size);
+    if (written == 0) return -1;
+    if (written != entry_size) abort();
     inode_ref(ctx, inode);
     if (inode_is_dir(inode)) inode_ref(ctx, dir);
     return entries;
@@ -725,7 +697,6 @@ static bool dir_remove(Ctx *ctx, Inode *dir, Path name)
     if (ino == -1) return false;
     if (off != dir_entry_count(ctx, dir) - 1) {
         // move the entry down if it's not the last one
-        block_dirty(ctx, entry_blkno(ctx, dir, off));
         Entry *dest = dir_get_entry(ctx, dir, off);
         Entry *src = dir_get_entry(ctx, dir, dir_entry_count(ctx, dir) - 1);
         memcpy(dest, src, ctx_geo(ctx)->entry_size);
@@ -770,12 +741,9 @@ static Inode *inode_from_path(Ctx *ctx, Path path)
 
 static Fd fd_new(Ctx *ctx, Ino ino)
 {
-    assert(ctx->fd == -1);
-    assert(ctx->fd_ino == -1);
     for (Fd fd = 0; fd < MAX_FDS; ++fd) {
         if (ctx->fs->fds[fd] == -1) {
-            ctx->fd = fd;
-            ctx->fd_ino = ino;
+            ctx->fs->fds[fd] = ino;
             return fd;
         }
     }
@@ -799,9 +767,8 @@ static bool fd_free(Ctx *ctx, Fd fd)
         ctx_set_errno(ctx, EBADF);
         return false;
     }
-    assert(ctx->fd == -1);
-    ctx->fd = fd;
-    assert(ctx->fd_ino == -1);
+    inode_unref(ctx, inode_get(ctx, ctx->fs->fds[fd]));
+    ctx->fs->fds[fd] = -1;
     return true;
 }
 
@@ -1016,7 +983,7 @@ ssize_t thinfs_pwrite(Thinfs *fs, ThinfsFd fd, void const *buf, size_t count, of
     Ctx ctx[1] = {ctx_open(fs)};
     ssize_t written = file_write(ctx, inode_get(ctx, fd_lookup(ctx, fd)), buf, count, off);
     if (written == -1) return -ctx_abandon(ctx);
-    return -ctx_commit(ctx) || written;
+    return written;
 }
 
 ThinfsErrno thinfs_unlink(Thinfs *fs, char const *path)
@@ -1081,10 +1048,10 @@ static Blkno bitmap_count_used(Ctx *ctx)
 {
     Blkno used = 0;
     for (size_t i = 0; i < ctx_geo(ctx)->bitmap_blocks - 1; ++i) {
-        void const *block = block_get_ro(ctx, ctx_geo(ctx)->bitmap_start + i);
+        void const *block = block_get(ctx, ctx_geo(ctx)->bitmap_start + i);
         used += count_set_bits(block, ctx_geo(ctx)->bitmap_density);
     }
-    void const *block = block_get_ro(ctx, ctx_geo(ctx)->bitmap_start + ctx_geo(ctx)->bitmap_blocks);
+    void const *block = block_get(ctx, ctx_geo(ctx)->bitmap_start + ctx_geo(ctx)->bitmap_blocks);
     used += count_set_bits(block, (ctx_geo(ctx)->data_blocks % ctx_geo(ctx)->bitmap_density) || ctx_geo(ctx)->bitmap_density);
     return used;
 }
