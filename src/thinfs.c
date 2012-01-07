@@ -1,5 +1,7 @@
 #include "thinfs.h"
 #include "types.h"
+#include <assert.h>
+#include <glib.h>
 #include <sys/mman.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -12,11 +14,13 @@
 #define MAX_FDS 0x1000
 #define THINFS_IFDIR S_IFDIR
 
+#undef MAX
 #define MAX(a,b) \
     ({ __typeof__ (a) _a = (a); \
        __typeof__ (b) _b = (b); \
        _a > _b ? _a : _b; })
 
+#undef MIN
 #define MIN(a,b) \
     ({ __typeof__ (a) _a = (a); \
        __typeof__ (b) _b = (b); \
@@ -36,29 +40,48 @@ struct Thinfs {
 };
 
 typedef struct {
-    Thinfs *fs;
+    Thinfs const *fs;
     ThinfsErrno eno;
     Time time;
+    GTree *dirty;
+    Fd fd;
+    Ino fd_ino;
 } Ctx;
-
 
 typedef struct {
     char const *s;
     size_t n;
 } Path;
 
+Geo const *ctx_geo(Ctx *ctx)
+{
+    return ctx->fs->geo;
+}
+
 static bool path_split(Path path, Path *dir, Path *base)
 {
     char *p = memrchr(path.s, '/', path.n);
-    *dir = (Path) {
-        .s = path.s,
-        .n = p - path.s
-    };
-    *base = (Path) {
-        .s = p + 1,
-        .n = path.n - dir->n - 1
-    };
-    if (p == path.s) dir->s = NULL;
+    if (p) {
+        if (p == path.s) {
+            *dir = (Path) {
+                .s = p,
+                .n = 1,
+            };
+        } else {
+            *dir = (Path) {
+                .s = path.s,
+                .n = p - path.s,
+            };
+        }
+        *base = (Path) {
+            .s = p + 1,
+            .n = path.s + path.n - (p + 1),
+        };
+        return true;
+    } else {
+        *dir = (Path) {};
+        *base = path;
+    }
     return true;
 }
 
@@ -75,18 +98,9 @@ Returns the next name in the path. If it's the end of the path, Path.s is set to
 */
 static Path path_next_name(Path full, Path last)
 {
-    Path next = { .s = last.s + last.n };
+    Path next = { .s = last.s + last.n + 1 };
     next.n = full.s + full.n - next.s;
-    if (next.n == 0) {
-        return (Path) {
-            .s = NULL,
-            .n = -1,
-        };
-    }
-    if (*next.s == '/') {
-        next.s++;
-        next.n--;
-    }
+    if (next.n == -1) return (Path) {};
     char *end = memchr(next.s, '/', next.n);
     if (end) next.n = end - next.s;
     return next;
@@ -95,17 +109,15 @@ static Path path_next_name(Path full, Path last)
 // return the first name in the path
 static Path path_first_name(Path path)
 {
-    if (path.s[0] != '/' || path.n == 0) {
+    char *end = memchr(path.s, '/', path.n);
+    if (end) {
         return (Path) {
             .s = path.s,
-            .n = 0,
+            .n = end - path.s,
         };
     }
-    Path last = {
-        .s = path.s,
-        .n = 1,
-    };
-    return path_next_name(path, last);
+    if (path.n == 0) path.s = NULL;
+    return path;
 }
 
 static Data *inode_file_data(Inode *inode)
@@ -146,13 +158,50 @@ static void ctx_clear_errno(Ctx *ctx)
     ctx->eno = 0;
 }
 
+static bool blkno_valid(Ctx *ctx, Blkno blkno)
+{
+    return 0 <= blkno && blkno < ctx_geo(ctx)->block_count;
+}
+
+static void const *block_get_ro(Ctx *ctx, Blkno blkno)
+{
+    if (!blkno_valid(ctx, blkno)) return NULL;
+    return ctx->fs->devbuf + blkno * ctx_geo(ctx)->block_size;
+}
+
 static void *block_get(Ctx *ctx, Blkno blkno)
 {
-    if (!(0 <= blkno && blkno < ctx->fs->geo->block_count)) {
-        ctx_set_errno(ctx, EIO);
-        return NULL;
-    }
-    return ctx->fs->devbuf + blkno * ctx->fs->geo->block_size;
+    gpointer block = g_tree_lookup(ctx->dirty, (gconstpointer)blkno);
+    if (block) return block;
+    block = malloc(ctx_geo(ctx)->block_size);
+    memcpy(block, block_get_ro(ctx, blkno), ctx_geo(ctx)->block_size);
+    g_tree_insert(ctx->dirty, (gpointer)blkno, block);
+    return block;
+}
+
+static void *block_replace(Ctx *ctx, Blkno blkno)
+{
+    gpointer block = g_tree_lookup(ctx->dirty, (gconstpointer)blkno);
+    if (block) return block;
+    block = malloc(ctx_geo(ctx)->block_size);
+    g_tree_insert(ctx->dirty, (gpointer)blkno, block);
+    return block;
+}
+
+static void block_dirty(Ctx *ctx, Blkno blkno)
+{
+    if (g_tree_lookup(ctx->dirty, (gconstpointer)blkno)) return;
+    gpointer block = malloc(ctx_geo(ctx)->block_size);
+    memcpy(block, ctx->fs->devbuf + blkno * ctx_geo(ctx)->block_size, ctx_geo(ctx)->block_size);
+    g_tree_insert(ctx->dirty, (gpointer)blkno, block);
+}
+
+ssize_t block_read(Ctx *ctx, Blkno blkno, void *buf, size_t count, Off off)
+{
+    count = MAX(0, MIN(count, ctx_geo(ctx)->block_size - off));
+    void const *block = block_get_ro(ctx, blkno);
+    memcpy(buf, block + off, count);
+    return count;
 }
 
 Geo geo_from_mbr(MBR const *mbr)
@@ -193,15 +242,10 @@ Thinfs *thinfs_mount(char const *path)
         perror("sysconf");
         goto failed;
     }
-    fs->devbuf = mmap(NULL, pagesize, PROT_READ|PROT_WRITE, MAP_SHARED, fs->devfd, 0);
-    if (fs->devbuf == MAP_FAILED) {
-        perror("mmap");
-        goto failed;
-    }
-    MBR *mbr = mmap(NULL, pagesize, PROT_READ|PROT_WRITE, MAP_SHARED, fs->devfd, 0);
+    MBR *mbr = mmap(NULL, pagesize, PROT_READ, MAP_SHARED, fs->devfd, 0);
     *fs->geo = geo_from_mbr(mbr);
     munmap(mbr, pagesize);
-    fs->devbuf = mmap(NULL, fs->geo->block_size * fs->geo->block_count, PROT_READ|PROT_WRITE, MAP_SHARED, fs->devfd, 0);
+    fs->devbuf = mmap(NULL, fs->geo->block_size * fs->geo->block_count, PROT_READ, MAP_SHARED, fs->devfd, 0);
     return fs;
 failed:
     thinfs_unmount(fs);
@@ -215,11 +259,17 @@ void thinfs_unmount(Thinfs *fs)
     free(fs);
 }
 
+static bool inode_valid(Ctx *ctx, Inode const *inode, Ino ino)
+{
+    if (inode->ino != ino) return false;
+    return true;
+}
+
 static Inode *inode_get(Ctx *ctx, Ino ino)
 {
     Inode *inode = block_get(ctx, ino);
     if (!inode) return NULL;
-    if (inode->ino != ino) {
+    if (!inode_valid(ctx, inode, ino)) {
         fprintf(stderr, "inode %" PRIINO " is corrupted\n", ino);
         ctx_set_errno(ctx, EIO);
         return NULL;
@@ -229,27 +279,44 @@ static Inode *inode_get(Ctx *ctx, Ino ino)
 
 static Blkno block_alloc(Ctx *ctx)
 {
-    for (size_t i = 0; i < ctx->fs->geo->data_blocks / CHAR_BIT; ++i) {
-        char *byte = ctx->fs->devbuf + ctx->fs->geo->block_size * ctx->fs->geo->bitmap_start + i;
-        if (*byte == -1) continue;
-        for (int j = 0; j < CHAR_BIT; ++j) {
-            if (!((*byte >> j) & 1)) {
-                *byte |= 1 << j;
-                return ctx->fs->geo->data_start + i * CHAR_BIT + j;
+    for (size_t i = 0; i < ctx_geo(ctx)->bitmap_blocks; ++i) {
+        Blkno bitmap_blkno = ctx_geo(ctx)->bitmap_start + i;
+        char *block = block_get(ctx, bitmap_blkno);
+        for (size_t j = 0; j < ctx_geo(ctx)->bitmap_density / CHAR_BIT; ++j) {
+            char byte = block[j];
+            if (byte == -1) continue;
+            for (int k = 0; k < CHAR_BIT; ++k) {
+                if (!((byte >> k) & 1)) {
+                    Blkno blkno = i * ctx_geo(ctx)->bitmap_density + j * CHAR_BIT + k;
+                    if (blkno >= ctx_geo(ctx)->data_blocks) goto no_space;
+                    block_dirty(ctx, bitmap_blkno);
+                    block = block_get(ctx, bitmap_blkno);
+                    block[j] |= 1 << k;
+                    return ctx_geo(ctx)->data_start + blkno;
+                }
             }
         }
-        abort();
-        return -1;
     }
+no_space:
     ctx_set_errno(ctx, ENOSPC);
     return -1;
+}
+
+static void inode_ref(Ctx *ctx, Inode *inode)
+{
+    inode->nlink++;
+}
+
+static void inode_unref(Ctx *ctx, Inode *inode)
+{
+    inode->nlink--;
 }
 
 static Inode *inode_new(Ctx *ctx, mode_t mode, dev_t rdev, uid_t uid, gid_t gid)
 {
     Ino ino = block_alloc(ctx);
     if (ino == -1) return NULL;
-    Inode *inode = block_get(ctx, ino);
+    Inode *inode = block_replace(ctx, ino);
     *inode = (Inode) {
         .ino = ino,
         .nlink = 1 ? S_ISDIR(mode) : 0,
@@ -265,6 +332,13 @@ static Inode *inode_new(Ctx *ctx, mode_t mode, dev_t rdev, uid_t uid, gid_t gid)
     return inode;
 }
 
+_Static_assert(sizeof(gconstpointer) >= sizeof(Blkno), "Blkno too large to be GTree key");
+
+static gint ctx_dirty_compare_data(gconstpointer a, gconstpointer b, gpointer data)
+{
+    return (Blkno)a - (Blkno)b;
+}
+
 Ctx ctx_open(Fs *fs)
 {
     return (Ctx) {
@@ -273,16 +347,33 @@ Ctx ctx_open(Fs *fs)
             .secs = -1,
             .nanos = -1,
         },
+        .dirty = g_tree_new_full(ctx_dirty_compare_data, NULL, NULL, free),
+        .fd = -1,
+        .fd_ino = -1,
     };
-}
-
-Geo const *ctx_geo(Ctx *ctx)
-{
-    return ctx->fs->geo;
 }
 
 Errno ctx_close(Ctx *ctx)
 {
+    Fs *fs = (Fs *)ctx->fs;
+    if (!ctx->eno) {
+        if (ctx->fd != -1) {
+            Ino *ino = &fs->fds[ctx->fd];
+            if (*ino != -1) inode_unref(ctx, inode_get(ctx, *ino));
+            *ino = ctx->fd_ino;
+        }
+        size_t block_size = ctx_geo(ctx)->block_size;
+        gboolean func(gpointer key, gpointer value, gpointer data) {
+            Blkno blkno = (Blkno)key;
+            if (block_size != pwrite(ctx->fs->devfd, value, block_size, blkno * block_size)) {
+                perror("pwrite");
+                abort();
+            }
+            return FALSE;
+        }
+        g_tree_foreach(ctx->dirty, func, NULL);
+    }
+    g_tree_destroy(ctx->dirty);
     return ctx->eno;
 }
 
@@ -330,7 +421,7 @@ static blkcnt_t data_blocks(Ctx *ctx, Data const *data)
             return 0;
         if (depth == 0)
             return 1;
-        Blkno const *indirect = block_get(ctx, blkno);
+        Blkno const *indirect = block_get_ro(ctx, blkno);
         blkcnt_t blocks = 1;
         for (int i = 0; i < ctx->fs->geo->bitmap_density; ++i)
             blocks += recurse(indirect[i], depth - 1);
@@ -369,55 +460,46 @@ static __attribute__((pure)) uint64_t depth_capacity_bytes(Ctx *ctx, Depth depth
     return depth_capacity_blocks(ctx, depth) * ctx->fs->geo->block_size;
 }
 
-static bool read_block(Ctx *ctx, Blkno blkno, void *buf, size_t count, Off off)
-{
-    void const *block = block_get(ctx, blkno);
-    memcpy(buf, block + off, count);
-    return true;
-}
-
 static Blkno data_bmap(Ctx *ctx, Data *data, Blkno index)
 {
     Blkno recurse(Blkno blkno, Depth depth, Blkno index) {
         if (depth == 0 && index == 0) return blkno;
         Blkno cap = depth_capacity_blocks(ctx, depth);
-        Indirect indirect = block_get(ctx, blkno);
+        Blkno const *indirect = block_get_ro(ctx, blkno);
         return recurse(indirect[index / cap], depth - 1, index % cap);
     }
     if (index >= depth_capacity_blocks(ctx, data->depth)) return -1;
     return recurse(data->root, data->depth - 1, index);
 }
 
-static bool data_read_recurse(Ctx *ctx, Blkno blkno, Depth depth, void *buf, size_t count, Off off)
-{
-    if (blkno == -1) {
-        memset(buf, 0, count);
-        return true;
-    }
-    if (depth == 0) {
-        return read_block(ctx, blkno, buf, count, off);
-    }
-    Blkno const *indirect = block_get(ctx, blkno);
-    uint64_t childcap = depth_capacity_bytes(ctx, depth);
-    indirect += off / childcap;
-    off %= childcap;
-    while (count != 0) {
-        size_t subcount = MIN(count, childcap - off);
-        if (!data_read_recurse(ctx, *indirect, depth-1, buf, subcount, off))
-            return false;
-        count -= subcount;
-        off = 0;
-    }
-    return true;
-}
-
 // return number of bytes read, or -1 on error
 static ssize_t data_read(Ctx *ctx, Data const *data, void *buf, size_t count, Off off)
 {
+    bool recurse(Blkno blkno, Depth depth, void *buf, size_t count, Off off) {
+        if (blkno == -1) {
+            memset(buf, 0, count);
+            return true;
+        }
+        if (depth == 0) {
+            return count == block_read(ctx, blkno, buf, count, off);
+        }
+        Blkno const *indirect = block_get_ro(ctx, blkno);
+        uint64_t childcap = depth_capacity_bytes(ctx, depth);
+        indirect += off / childcap;
+        off %= childcap;
+        while (count != 0) {
+            size_t subcount = MIN(count, childcap - off);
+            if (!recurse(*indirect, depth-1, buf, subcount, off))
+                return false;
+            count -= subcount;
+            off = 0;
+        }
+        return count == 0;
+    }
     count = MIN(count, MAX(data->size - off, 0));
     uint64_t tree_cap = depth_capacity_bytes(ctx, data->depth);
     uint64_t tree_count = MIN(count, MAX(tree_cap - off, 0));
-    if (!data_read_recurse(ctx, data->root, data->depth, buf, tree_count, off))
+    if (!recurse(data->root, data->depth - 1, buf, tree_count, off))
         return -1;
     if (count > tree_count)
         memset(buf + tree_count, 0, count - tree_count);
@@ -429,7 +511,7 @@ static Off data_lengthen(Ctx *ctx, Data *data, Off len)
     while (depth_capacity_bytes(ctx, data->depth) < len) {
         Blkno new_root = block_alloc(ctx);
         if (new_root == -1) return -1;
-        Blkno *indirect = block_get(ctx, new_root);
+        Blkno *indirect = block_replace(ctx, new_root);
         memset(indirect, -1, ctx_geo(ctx)->block_size);
         *indirect = data->root;
         data->root = new_root;
@@ -521,6 +603,39 @@ static ssize_t inode_read(Ctx *ctx, Inode const *inode, void *buf, size_t count,
     return data_read(ctx, inode->file_data, buf, count, off);
 }
 
+static ssize_t inode_write(Ctx *ctx, Inode *inode, void const *buf, size_t count, Off off)
+{
+    ssize_t nwrite = data_write(ctx, inode_file_data(inode), buf, count, off);
+    if (nwrite > 0) {
+        inode->ctime = ctx_time(ctx);
+        inode->mtime = ctx_time(ctx);
+    }
+    return nwrite;
+}
+
+static ssize_t file_write(Ctx *ctx, Inode *inode, void const *buf, size_t count, Off off)
+{
+    return inode_write(ctx, inode, buf, count, off);
+}
+
+static Off inode_size(Ctx *ctx, Inode *inode)
+{
+    return inode_file_data(inode)->size;
+}
+
+static bool file_truncate(Ctx *ctx, Inode *inode, Off len)
+{
+    if (inode_is_dir(inode)) {
+        ctx_set_errno(ctx, EISDIR);
+        return false;
+    }
+    if (inode_size(ctx, inode) != len) {
+        inode->ctime = ctx_time(ctx);
+        inode->mtime = ctx_time(ctx);
+    }
+    return data_truncate(ctx, inode_file_data(inode), len);
+}
+
 static Ino root_ino(Ctx *ctx)
 {
     return ctx->fs->geo->data_start;
@@ -544,18 +659,22 @@ static Off dir_entry_count(Ctx *ctx, Inode *dir)
     return size / entry_size;
 }
 
-static Entry *dir_get_entry(Ctx *ctx, Inode *inode, Off off)
+static Blkno entry_blkno(Ctx *ctx, Inode *dir, Off off)
 {
     Blkno blkidx = off / ctx_geo(ctx)->entries_per_block;
-    Blkno blkno = data_bmap(ctx, inode_file_data(inode), blkidx);
-    void *block = block_get(ctx, blkno);
+    return data_bmap(ctx, inode_file_data(dir), blkidx);
+}
+
+static Entry *dir_get_entry(Ctx *ctx, Inode *inode, Off off)
+{
+    void *block = block_get(ctx, entry_blkno(ctx, inode, off));
     return block + (ctx_geo(ctx)->entry_size * (off % ctx_geo(ctx)->entries_per_block));
 }
 
 static Ino dir_find_off(Ctx *ctx, Inode *inode, Path name, Off *off)
 {
     for (*off = 0; *off < dir_entry_count(ctx, inode); ++*off) {
-        Entry *entry = dir_get_entry(ctx, inode, *off);
+        Entry const *entry = dir_get_entry(ctx, inode, *off);
         if (!entry) return -1;
         if (entry->namelen != name.n) continue;
         if (memcmp(name.s, entry->name, name.n)) continue;
@@ -594,8 +713,8 @@ static Off dir_add(Ctx *ctx, Inode *dir, Path name, Inode *inode)
         ctx_set_errno(ctx, EIO);
         return -1;
     }
-    inode->nlink++;
-    if (inode_is_dir(inode)) dir->nlink++;
+    inode_ref(ctx, inode);
+    if (inode_is_dir(inode)) inode_ref(ctx, dir);
     return entries;
 }
 
@@ -606,6 +725,7 @@ static bool dir_remove(Ctx *ctx, Inode *dir, Path name)
     if (ino == -1) return false;
     if (off != dir_entry_count(ctx, dir) - 1) {
         // move the entry down if it's not the last one
+        block_dirty(ctx, entry_blkno(ctx, dir, off));
         Entry *dest = dir_get_entry(ctx, dir, off);
         Entry *src = dir_get_entry(ctx, dir, dir_entry_count(ctx, dir) - 1);
         memcpy(dest, src, ctx_geo(ctx)->entry_size);
@@ -623,7 +743,10 @@ static bool dir_remove(Ctx *ctx, Inode *dir, Path name)
 
 static Ino ino_from_path(Ctx *ctx, Path path)
 {
+    if (path.n == 0 || path.s[0] != '/') return -1;
     Ino ino = root_ino(ctx);
+    path.s++;
+    path.n--;
     Path name = path_first_name(path);
     while (name.s) {
         if (name.n == 0) {
@@ -632,8 +755,7 @@ static Ino ino_from_path(Ctx *ctx, Path path)
         }
         Inode *inode = inode_get(ctx, ino);
         ino = dir_find(ctx, inode, name);
-        if (ino == -1 && ctx_get_errno(ctx))
-            return -1;
+        if (ino == -1) break;
         name = path_next_name(path, name);
     }
     return ino;
@@ -648,9 +770,12 @@ static Inode *inode_from_path(Ctx *ctx, Path path)
 
 static Fd fd_new(Ctx *ctx, Ino ino)
 {
+    assert(ctx->fd == -1);
+    assert(ctx->fd_ino == -1);
     for (Fd fd = 0; fd < MAX_FDS; ++fd) {
         if (ctx->fs->fds[fd] == -1) {
-            ctx->fs->fds[fd] = ino;
+            ctx->fd = fd;
+            ctx->fd_ino = ino;
             return fd;
         }
     }
@@ -674,7 +799,9 @@ static bool fd_free(Ctx *ctx, Fd fd)
         ctx_set_errno(ctx, EBADF);
         return false;
     }
-    ctx->fs->fds[fd] = -1;
+    assert(ctx->fd == -1);
+    ctx->fd = fd;
+    assert(ctx->fd_ino == -1);
     return true;
 }
 
@@ -778,25 +905,28 @@ ThinfsErrno thinfs_chmod(Thinfs *fs, char const *path, mode_t mode)
 {
     Ctx ctx[1] = {ctx_open(fs)};
     Inode *inode = inode_get(ctx, ino_from_path(ctx, path_from_cstr(path)));
-    if (!inode) goto done;
+    if (!inode) goto fail;
     inode->mode &= ~07777;
     inode->mode |= mode & 07777;
     inode->ctime = ctx_time(ctx);
-done:
-    return ctx_close(ctx);
+    return ctx_commit(ctx);
+fail:
+    return ctx_abandon(ctx);
 }
 
 ThinfsErrno thinfs_chown(Thinfs *fs, char const *path, uid_t uid, gid_t gid)
 {
     Ctx ctx[1] = {ctx_open(fs)};
     Inode *inode = inode_get(ctx, ino_from_path(ctx, path_from_cstr(path)));
-    if (!inode) goto done;
+    if (!inode) goto fail;
     if (uid == -1 && gid == -1) goto done;
     if (uid != -1) inode->uid = uid;
     if (gid != -1) inode->gid = gid;
     inode->ctime = ctx_time(ctx);
 done:
-    return ctx_close(ctx);
+    return ctx_commit(ctx);
+fail:
+    return ctx_abandon(ctx);
 }
 
 ThinfsErrno thinfs_close(Thinfs *fs, ThinfsFd fd)
@@ -840,6 +970,15 @@ ThinfsErrno thinfs_fsyncdir(Thinfs *fs, ThinfsFd fd, int dataonly)
 ThinfsErrno thinfs_link(Thinfs *fs, char const *target, char const *path)
 {
     Ctx ctx[1] = {ctx_open(fs)};
+    Inode *inode = inode_get(ctx, ino_from_path(ctx, path_from_cstr(path)));
+    if (!inode) goto fail;
+    Path dirname, basename;
+    path_split(path_from_cstr(path), &dirname, &basename);
+    Dir *dir = inode_get(ctx, ino_from_path(ctx, dirname));
+    if (!dir) goto fail;
+    if (-1 == dir_add(ctx, dir, basename, inode)) goto fail;
+    return ctx_commit(ctx);
+fail:
     return ctx_close(ctx);
 }
 
@@ -862,13 +1001,22 @@ ThinfsErrno thinfs_mknod(Thinfs *fs, char const *path, mode_t mode, dev_t dev, u
 ssize_t thinfs_pread(Thinfs *fs, ThinfsFd fd, void *buf, size_t count, off_t off)
 {
     Ctx ctx[1] = {ctx_open(fs)};
-    return -ctx_abandon(ctx) || -EOPNOTSUPP;
+    Inode *inode = inode_get(ctx, fd_lookup(ctx, fd));
+    ssize_t nread = inode_read(ctx, inode, buf, count, off);
+    if (-1 == nread) goto fail;
+    Errno eno = ctx_commit(ctx);
+    if (eno) return -eno;
+    return nread;
+fail:
+    return -ctx_abandon(ctx);
 }
 
 ssize_t thinfs_pwrite(Thinfs *fs, ThinfsFd fd, void const *buf, size_t count, off_t off)
 {
     Ctx ctx[1] = {ctx_open(fs)};
-    return -ctx_abandon(ctx) || -EOPNOTSUPP;
+    ssize_t written = file_write(ctx, inode_get(ctx, fd_lookup(ctx, fd)), buf, count, off);
+    if (written == -1) return -ctx_abandon(ctx);
+    return -ctx_commit(ctx) || written;
 }
 
 ThinfsErrno thinfs_unlink(Thinfs *fs, char const *path)
@@ -876,6 +1024,9 @@ ThinfsErrno thinfs_unlink(Thinfs *fs, char const *path)
     Ctx ctx[1] = {ctx_open(fs)};
     Path dirname, basename;
     path_split(path_from_cstr(path), &dirname, &basename);
+    Ino parent_ino = ino_from_path(ctx, dirname);
+    if (parent_ino == -1) goto fail;
+
     Inode *parent = inode_from_path(ctx, dirname);
     if (!parent) goto fail;
     if (!dir_remove(ctx, parent, basename)) goto fail;
@@ -893,6 +1044,7 @@ ThinfsErrno thinfs_rename(Thinfs *fs, char const *oldpath, char const *newpath)
 ThinfsErrno thinfs_rmdir(Thinfs *fs, char const *path)
 {
     Ctx ctx[1] = {ctx_open(fs)};
+
     return ctx_abandon(ctx) || EOPNOTSUPP;
 }
 
@@ -902,16 +1054,56 @@ ThinfsErrno thinfs_symlink(Thinfs *fs, char const *target, char const *path)
     return ctx_abandon(ctx) || EOPNOTSUPP;
 }
 
-ThinfsErrno thinfs_truncate(Thinfs *fs, char const *path, off_t size)
+ThinfsErrno thinfs_truncate(Thinfs *fs, char const *path, off_t length)
 {
     Ctx ctx[1] = {ctx_open(fs)};
-    return ctx_abandon(ctx) || EOPNOTSUPP;
+    if (file_truncate(ctx, inode_get(ctx, ino_from_path(ctx, path_from_cstr(path))), length))
+        return ctx_commit(ctx);
+    return ctx_abandon(ctx);
+}
+
+static int count_set_bits(void const *buf_, size_t bits)
+{
+    int count = 0;
+    char const *buf = buf_;
+    for (size_t i = 0; i < bits / CHAR_BIT; ++i) {
+        for (int j = 0; j < CHAR_BIT; ++j) {
+            if ((buf[i] >> j) & 1) count++;
+        }
+    }
+    for (int j = 0; j < bits % CHAR_BIT; ++j) {
+        if ((buf[bits/CHAR_BIT] >> j) & 1) count++;
+    }
+    return count;
+}
+
+static Blkno bitmap_count_used(Ctx *ctx)
+{
+    Blkno used = 0;
+    for (size_t i = 0; i < ctx_geo(ctx)->bitmap_blocks - 1; ++i) {
+        void const *block = block_get_ro(ctx, ctx_geo(ctx)->bitmap_start + i);
+        used += count_set_bits(block, ctx_geo(ctx)->bitmap_density);
+    }
+    void const *block = block_get_ro(ctx, ctx_geo(ctx)->bitmap_start + ctx_geo(ctx)->bitmap_blocks);
+    used += count_set_bits(block, (ctx_geo(ctx)->data_blocks % ctx_geo(ctx)->bitmap_density) || ctx_geo(ctx)->bitmap_density);
+    return used;
 }
 
 ThinfsErrno thinfs_statvfs(Thinfs *fs, struct statvfs *buf)
 {
     Ctx ctx[1] = {ctx_open(fs)};
-    return ctx_abandon(ctx) || EOPNOTSUPP;
+    Blkno used_count = bitmap_count_used(ctx);
+    size_t block_size = ctx_geo(ctx)->block_size;
+    Blkno data_blocks = ctx_geo(ctx)->data_blocks;
+    *buf = (struct statvfs) {
+        .f_bsize = block_size,
+        .f_frsize = block_size,
+        .f_blocks = data_blocks,
+        .f_bfree = data_blocks - used_count,
+        .f_bavail = data_blocks - used_count,
+        .f_namemax = NAME_MAX,
+    };
+    return ctx_commit(ctx);
 }
 
 ThinfsErrno thinfs_flush(Thinfs *fs, ThinfsFd fd)
@@ -1024,7 +1216,16 @@ ThinfsErrno thinfs_releasedir(Thinfs *fs, ThinfsFd fd)
 ThinfsErrno thinfs_ftruncate(Thinfs *fs, ThinfsFd fd, off_t len)
 {
     Ctx ctx[1] = {ctx_open(fs)};
-    return ctx_abandon(ctx) || EOPNOTSUPP;
+    Inode *inode = inode_get(ctx, fd_lookup(ctx, fd));
+    if (!inode) goto fail;
+    if (len == inode_file_data(inode)->size) goto done;
+    if (!data_truncate(ctx, inode_file_data(inode), len)) goto fail;
+    inode->mtime = ctx_time(ctx);
+    inode->ctime = ctx_time(ctx);
+done:
+    return ctx_commit(ctx);
+fail:
+    return ctx_abandon(ctx);
 }
 
 ThinfsErrno thinfs_utimens(Thinfs *fs, char const *path, const struct timespec times[2])

@@ -64,3 +64,5 @@ typedef struct {
     Time mtime;
     Time ctime;
 } Inode;
+
+typedef Inode Dir;
