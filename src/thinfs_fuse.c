@@ -51,7 +51,7 @@ static int thinfs_fuse_rmdir(char const *path)
 
 static int thinfs_fuse_symlink(char const *target, char const *path)
 {
-    return -thinfs_symlink(get_fs(), target, path);
+    return -thinfs_symlink(get_fs(), target, path, get_uid(), get_gid());
 }
 
 static int thinfs_fuse_rename(char const *oldpath, char const *newpath)

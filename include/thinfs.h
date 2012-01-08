@@ -34,7 +34,7 @@ ThinfsErrno thinfs_unlink(Thinfs *, char const *path);
 ssize_t     thinfs_readlink(Thinfs *, const char *path, char *buf, size_t bufsize);
 ThinfsErrno thinfs_rename(Thinfs *, char const *oldpath, char const *newpath);
 ThinfsErrno thinfs_rmdir(Thinfs *, char const *path);
-ThinfsErrno thinfs_symlink(Thinfs *, char const *target, char const *path);
+ThinfsErrno thinfs_symlink(Thinfs *, char const *target, char const *path, uid_t, gid_t);
 ThinfsErrno thinfs_statvfs(Thinfs *, struct statvfs *);
 ThinfsErrno thinfs_setxattr(Thinfs *, char const *path, char const *name, char const *value, size_t size, int flags);
 ThinfsErrno thinfs_truncate(Thinfs *, char const *path, off_t size);
