@@ -1,0 +1,46 @@
+matt@stanley:/tmp/thinfs$ df -h
+Filesystem      Size  Used Avail Use% Mounted on
+mount.thinfs    100M  4.0K  100M   1% /tmp/thinfs/dir
+matt@stanley:/tmp/thinfs$ time hg clone ~/src/anacrolix dir/anacrolix
+updating to branch default
+pulling subrepo utility/pybake from https://pybake.googlecode.com/hg
+requesting all changes
+adding changesets
+adding manifests
+adding file changes
+added 15 changesets with 45 changes to 33 files (+2 heads)
+1490 files updated, 0 files merged, 0 files removed, 0 files unresolved
+
+real	0m22.004s
+user	0m1.500s
+sys	0m0.844s
+matt@stanley:/tmp/thinfs$ df -h
+Filesystem      Size  Used Avail Use% Mounted on
+mount.thinfs    100M   81M   20M  81% /tmp/thinfs/dir
+matt@stanley:/tmp/thinfs$ time du -hs dir
+58M	dir
+
+real	0m3.795s
+user	0m0.020s
+sys	0m0.112s
+matt@stanley:/tmp/thinfs$ time du -hs --apparent-size dir
+39M	dir
+
+real	0m3.805s
+user	0m0.036s
+sys	0m0.088s
+matt@stanley:/tmp/thinfs$ time find dir | wc -l
+5772
+
+real	0m2.472s
+user	0m0.016s
+sys	0m0.080s
+matt@stanley:/tmp/thinfs$ time rm -r dir
+rm: cannot remove `dir': Device or resource busy
+
+real	0m5.986s
+user	0m0.024s
+sys	0m0.180s
+matt@stanley:/tmp/thinfs$ df -h
+Filesystem      Size  Used Avail Use% Mounted on
+mount.thinfs    100M  4.0K  100M   1% /tmp/thinfs/dir
