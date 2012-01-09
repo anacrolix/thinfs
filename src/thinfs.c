@@ -1029,7 +1029,10 @@ ThinfsErrno thinfs_unlink(Thinfs *fs, char const *path)
         goto fail;
     }
     if (!dir_remove(ctx, dir, off)) goto fail;
+    inode->ctime = ctx_time(ctx);
     inode_unlink(ctx, dir, inode);
+    dir->ctime = ctx_time(ctx);
+    dir->mtime = ctx_time(ctx);
     return ctx_commit(ctx);
 fail:
     return ctx_abandon(ctx);
