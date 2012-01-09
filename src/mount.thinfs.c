@@ -26,6 +26,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "no device path specified\n");
         return 2;
     }
+    fuse_opt_insert_arg(&fuse_args, 1, "-ouse_ino");
     Thinfs *fs = thinfs_mount(fs_dev_path);
     if (!fs) {
         fprintf(stderr, "failed to mount device\n");
