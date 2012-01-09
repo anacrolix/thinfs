@@ -1047,7 +1047,9 @@ ThinfsErrno thinfs_rename(Thinfs *fs, char const *oldpath, char const *newpath)
     Inode *olddir = inode_from_path(ctx, olddirname);
     Inode *newdir = inode_from_path(ctx, newdirname);
     Off oldentryoff = dir_find(ctx, olddir, oldbasename);
-    Inode *oldinode = inode_get(ctx, dir_entry_get(ctx, olddir, oldentryoff)->ino);
+    Entry *oldentry = dir_entry_get(ctx, olddir, oldentryoff);
+    if (!oldentry) goto fail;
+    Inode *oldinode = inode_get(ctx, oldentry->ino);
     if (!oldinode) goto fail;
     Off newentryoff = dir_find(ctx, newdir, newbasename);
     Entry *newentry = dir_entry_get(ctx, newdir, newentryoff);
