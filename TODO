@@ -5,3 +5,5 @@
  * set during init: max write, atomic open trunc, export support, big writes
  * wrap xattr funcs in HAVE_SETXATTR
  * mark pure functions and check repeat calls to them are optimized
+ * truncating a file to increase its length might introduce uninitialized data that exists on partially used blocks
+ * there may be a leak in the shortening of the data indirect trees

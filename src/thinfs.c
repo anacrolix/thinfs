@@ -536,11 +536,10 @@ static void data_shorten(Ctx *ctx, Data *data, Off len)
     data->size = len;
 }
 
-static bool data_truncate(Ctx *ctx, Data *data, Off len)
+static void data_truncate(Ctx *ctx, Data *data, Off len)
 {
     if (len < data->size) data_shorten(ctx, data, len);
-    else if (len > data->size) return data_lengthen(ctx, data, len);
-    return true;
+    else if (len > data->size) data->size = len;
 }
 
 static bool dir_is_empty(Inode *dir)
@@ -555,7 +554,7 @@ static void inode_unref(Ctx *ctx, Inode *inode)
     if (inode->nlink < inode_nlink_min(inode)) abort();
     if (inode->nlink != inode_nlink_min(inode)) return;
     if (inode_is_dir(inode) && !dir_is_empty(inode)) abort();
-    if (!data_truncate(ctx, inode->file_data, 0)) abort();
+    data_truncate(ctx, inode->file_data, 0);
     block_free(ctx, inode->ino);
 }
 
@@ -633,7 +632,8 @@ static bool file_truncate(Ctx *ctx, Inode *inode, Off len)
         inode->ctime = ctx_time(ctx);
         inode->mtime = ctx_time(ctx);
     }
-    return data_truncate(ctx, inode_file_data(inode), len);
+    data_truncate(ctx, inode_file_data(inode), len);
+    return true;
 }
 
 static Inode *root_inode(Ctx *ctx)
@@ -1280,7 +1280,7 @@ ThinfsErrno thinfs_ftruncate(Thinfs *fs, ThinfsFd fd, off_t len)
     Inode *inode = inode_get(ctx, fd_lookup(ctx, fd));
     if (!inode) goto fail;
     if (len == inode_file_data(inode)->size) goto done;
-    if (!data_truncate(ctx, inode_file_data(inode), len)) goto fail;
+    data_truncate(ctx, inode_file_data(inode), len);
     inode->mtime = ctx_time(ctx);
     inode->ctime = ctx_time(ctx);
 done:
