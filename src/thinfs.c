@@ -1074,8 +1074,8 @@ ThinfsErrno thinfs_rename(Thinfs *fs, char const *oldpath, char const *newpath)
         newentry->ino = oldinode->ino;
     } else {
         if (-1 == dir_add(ctx, newdir, newbasename, oldinode->ino)) goto fail;
-        inode_link(ctx, newdir, oldinode);
     }
+    inode_link(ctx, newdir, oldinode);
     if (!dir_remove(ctx, olddir, oldentryoff)) abort();
     inode_unlink(ctx, olddir, oldinode);
     return ctx_commit(ctx);
