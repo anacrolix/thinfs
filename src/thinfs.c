@@ -793,7 +793,8 @@ ssize_t thinfs_readlink(Fs *fs, char const *path, char *buf, size_t bufsize)
     if (!inode) goto fail;
     ssize_t actual = inode_read(ctx, inode, buf, bufsize, 0);
     if (actual == -1) goto fail;
-    return -ctx_close(ctx) || actual;
+    ctx_commit(ctx);
+    return actual;
 fail:
     return -ctx_close(ctx);
 }
