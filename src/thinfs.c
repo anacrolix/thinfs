@@ -906,6 +906,7 @@ ThinfsErrno thinfs_chown(Thinfs *fs, char const *path, uid_t uid, gid_t gid)
     if (uid != -1) inode->uid = uid;
     if (gid != -1) inode->gid = gid;
     inode->ctime = ctx_time(ctx);
+    if (inode->mode & (S_IXUSR|S_IXGRP|S_IXOTH)) inode->mode &= ~(S_ISUID|S_ISGID);
 done:
     return ctx_commit(ctx);
 fail:
@@ -934,6 +935,7 @@ static Inode *inode_create(Ctx *ctx, char const *path, mode_t mode, dev_t rdev, 
         return NULL;
     }
     inode_link(ctx, dir, inode);
+    dir->ctime = dir->mtime = ctx_time(ctx);
     inode_unref(ctx, inode);
     return inode;
 }
@@ -1029,10 +1031,10 @@ ThinfsErrno thinfs_unlink(Thinfs *fs, char const *path)
         goto fail;
     }
     if (!dir_remove(ctx, dir, off)) goto fail;
-    inode->ctime = ctx_time(ctx);
-    inode_unlink(ctx, dir, inode);
     dir->ctime = ctx_time(ctx);
     dir->mtime = ctx_time(ctx);
+    inode->ctime = ctx_time(ctx);
+    inode_unlink(ctx, dir, inode);
     return ctx_commit(ctx);
 fail:
     return ctx_abandon(ctx);
@@ -1103,6 +1105,8 @@ ThinfsErrno thinfs_rmdir(Thinfs *fs, char const *path)
         goto fail;
     }
     if (!dir_remove(ctx, dir, entryoff)) abort();
+    dir->ctime = dir->mtime = ctx_time(ctx);
+    inode->ctime = ctx_time(ctx);
     inode_unlink(ctx, dir, inode);
     return ctx_commit(ctx);
 fail:
