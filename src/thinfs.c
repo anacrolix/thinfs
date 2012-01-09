@@ -726,6 +726,10 @@ static bool dir_remove(Ctx *ctx, Inode *dir, Off off)
 
 static Inode *inode_from_path(Ctx *ctx, Path path)
 {
+    if (path.n >= PATH_MAX) {
+        ctx_set_errno(ctx, ENAMETOOLONG);
+        return NULL;
+    }
     if (path.n-- == 0 || *path.s++ != '/') {
         ctx_set_errno(ctx, EINVAL);
         return NULL;
@@ -735,6 +739,9 @@ static Inode *inode_from_path(Ctx *ctx, Path path)
     while (name.s) {
         if (name.n == 0) {
             ctx_set_errno(ctx, EINVAL);
+            return NULL;
+        } else if (name.n > NAME_MAX) {
+            ctx_set_errno(ctx, ENAMETOOLONG);
             return NULL;
         }
         Entry *entry = dir_entry_get(ctx, inode, dir_find(ctx, inode, name));
