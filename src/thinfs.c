@@ -1089,7 +1089,10 @@ ThinfsErrno thinfs_rmdir(Thinfs *fs, char const *path)
     Inode *dir = inode_from_path(ctx, dirname);
     Off entryoff = dir_find(ctx, dir, basename);
     Inode *inode = inode_get(ctx, dir_entry_get(ctx, dir, entryoff)->ino);
-    if (!dir_is_empty(inode)) goto fail;
+    if (!dir_is_empty(inode)) {
+        ctx_set_errno(ctx, ENOTEMPTY);
+        goto fail;
+    }
     if (!dir_remove(ctx, dir, entryoff)) abort();
     inode_unlink(ctx, dir, inode);
     return ctx_commit(ctx);
