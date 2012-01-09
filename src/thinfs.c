@@ -1070,6 +1070,7 @@ ThinfsErrno thinfs_rename(Thinfs *fs, char const *oldpath, char const *newpath)
                 goto fail;
             }
         }
+        newinode->ctime = ctx_time(ctx);
         inode_unlink(ctx, newdir, newinode);
         newentry->ino = oldinode->ino;
     } else {
@@ -1078,6 +1079,12 @@ ThinfsErrno thinfs_rename(Thinfs *fs, char const *oldpath, char const *newpath)
     inode_link(ctx, newdir, oldinode);
     if (!dir_remove(ctx, olddir, oldentryoff)) abort();
     inode_unlink(ctx, olddir, oldinode);
+    olddir->ctime = ctx_time(ctx);
+    olddir->mtime = ctx_time(ctx);
+    newdir->ctime = ctx_time(ctx);
+    newdir->mtime = ctx_time(ctx);
+    // updating the ctime of renamed files is implementation defined
+    oldinode->ctime = ctx_time(ctx);
     return ctx_commit(ctx);
 fail:
     return ctx_abandon(ctx);
