@@ -645,11 +645,7 @@ static Off dir_entry_count(Ctx *ctx, Inode *dir)
 {
     Off size = inode_file_data(dir)->size;
     Off entry_size = ctx_geo(ctx)->entry_size;
-    if (size % entry_size) {
-        fprintf(stderr, "directory has invalid size\n");
-        ctx_set_errno(ctx, EIO);
-        return -1;
-    }
+    if (size % entry_size) abort();
     return size / entry_size;
 }
 
