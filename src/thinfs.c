@@ -960,7 +960,7 @@ ThinfsErrno thinfs_fsyncdir(Thinfs *fs, ThinfsFd fd, int dataonly)
 ThinfsErrno thinfs_link(Thinfs *fs, char const *target, char const *path)
 {
     Ctx ctx[1] = {ctx_open(fs)};
-    Inode *inode = inode_from_path(ctx, path_from_cstr(path));
+    Inode *inode = inode_from_path(ctx, path_from_cstr(target));
     if (!inode) goto fail;
     Path dirname, basename;
     path_split(path_from_cstr(path), &dirname, &basename);
@@ -968,6 +968,9 @@ ThinfsErrno thinfs_link(Thinfs *fs, char const *target, char const *path)
     if (!dir) goto fail;
     if (-1 == dir_add(ctx, dir, basename, inode->ino)) goto fail;
     inode_link(ctx, dir, inode);
+    dir->ctime = ctx_time(ctx);
+    dir->mtime = ctx_time(ctx);
+    inode->ctime = ctx_time(ctx);
     return ctx_commit(ctx);
 fail:
     return ctx_close(ctx);
