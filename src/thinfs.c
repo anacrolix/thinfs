@@ -638,16 +638,46 @@ static Entry *dir_entry_get(Ctx *ctx, Inode *inode, Off off)
     return block + (ctx_geo(ctx)->entry_size * (off % ctx_geo(ctx)->entries_per_block));
 }
 
-static Off dir_find(Ctx *ctx, Inode *dir, Path name)
+static Off dir_find_entry(Ctx *ctx, Inode *dir, Path name, Entry **entry_)
 {
-    for (Off off = 0; off < dir_entry_count(ctx, dir); ++off) {
-        Entry *entry = dir_entry_get(ctx, dir, off);
-        if (entry->namelen != name.n) continue;
-        if (memcmp(name.s, entry->name, name.n)) continue;
+    int nents = dir_entry_count(ctx, dir);
+    if (nents == 0) goto not_found;
+    int entpblk = ctx_geo(ctx)->entries_per_block;
+    int entsize = ctx_geo(ctx)->entry_size;
+    int inddens = ctx_geo(ctx)->indirect_density;
+    Entry *entry;
+    Off off = 0;
+    bool recurse(Blkno blkno, Depth depth) {
+        if (depth == 0) {
+            void *block = block_get(ctx, blkno);
+            int endoff = MIN(nents - off, entpblk);
+            for (int i = 0; i != endoff; ++i, ++off) {
+                entry = block + i * entsize;
+                if (entry->namelen != name.n) continue;
+                if (memcmp(name.s, entry->name, name.n)) continue;
+                return true;
+            }
+        } else {
+            Blkno *indirect = block_get(ctx, blkno);
+            for (int i = 0; *indirect != -1 && i < inddens; ++i, indirect++) {
+                if (recurse(*indirect, depth - 1)) return true;
+            }
+        }
+        return false;
+    }
+    if (recurse(dir->file_data->root, dir->file_data->depth - 1)) {
+        *entry_ = entry;
         return off;
     }
+not_found:
     ctx_set_errno(ctx, ENOENT);
     return -1;
+}
+
+static Off dir_find(Ctx *ctx, Inode *dir, Path name)
+{
+    Entry *entry;
+    return dir_find_entry(ctx, dir, name, &entry);
 }
 
 static Off dir_add(Ctx *ctx, Inode *dir, Path name, Ino ino)
@@ -720,8 +750,8 @@ static Inode *inode_from_path(Ctx *ctx, Path path)
             ctx_set_errno(ctx, ENAMETOOLONG);
             return NULL;
         }
-        Entry *entry = dir_entry_get(ctx, inode, dir_find(ctx, inode, name));
-        if (!entry) return NULL;
+        Entry *entry;
+        if (-1 == dir_find_entry(ctx, inode, name, &entry)) return NULL;
         inode = inode_get(ctx, entry->ino);
         name = path_next_name(path, name);
     }
@@ -1009,9 +1039,9 @@ ThinfsErrno thinfs_unlink(Thinfs *fs, char const *path)
     Path dirname, basename;
     path_split(path_from_cstr(path), &dirname, &basename);
     Inode *dir = inode_from_path(ctx, dirname);
-    Off off = dir_find(ctx, dir, basename);
-    Entry *entry = dir_entry_get(ctx, dir, off);
-    if (!entry) goto fail;
+    Entry *entry;
+    Off off = dir_find_entry(ctx, dir, basename, &entry);
+    if (-1 == off) goto fail;
     Inode *inode = inode_get(ctx, entry->ino);
     if (!inode) goto fail;
     if (inode_is_dir(inode)) {
@@ -1036,9 +1066,9 @@ ThinfsErrno thinfs_rename(Thinfs *fs, char const *oldpath, char const *newpath)
     path_split(path_from_cstr(newpath), &newdirname, &newbasename);
     Inode *olddir = inode_from_path(ctx, olddirname);
     Inode *newdir = inode_from_path(ctx, newdirname);
-    Off oldentryoff = dir_find(ctx, olddir, oldbasename);
-    Entry *oldentry = dir_entry_get(ctx, olddir, oldentryoff);
-    if (!oldentry) goto fail;
+    Entry *oldentry;
+    Off oldentryoff = dir_find_entry(ctx, olddir, oldbasename, &oldentry);
+    if (oldentryoff == -1) goto fail;
     Inode *oldinode = inode_get(ctx, oldentry->ino);
     if (!oldinode) goto fail;
     Off newentryoff = dir_find(ctx, newdir, newbasename);
