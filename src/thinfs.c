@@ -958,7 +958,8 @@ ThinfsFd thinfs_create(Thinfs *fs, char const *path, mode_t mode, uid_t uid, gid
     if (!inode) goto fail;
     Fd fd = fd_new(ctx, inode->ino);
     if (fd == -1) goto fail;
-    return -ctx_commit(ctx) || fd;
+    ctx_commit(ctx);
+    return fd;
 fail:
     return -ctx_abandon(ctx);
 }
