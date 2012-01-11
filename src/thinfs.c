@@ -51,7 +51,7 @@ typedef struct {
     size_t n;
 } Path;
 
-Geo const *ctx_geo(Ctx *ctx)
+static Geo const *ctx_geo(Ctx *ctx)
 {
     return ctx->fs->geo;
 }
@@ -189,7 +189,7 @@ static void *block_get(Ctx *ctx, Blkno blkno)
     return ctx->fs->devbuf + blkno * ctx_geo(ctx)->block_size;
 }
 
-ssize_t block_read(Ctx *ctx, Blkno blkno, void *buf, size_t count, Off off)
+static ssize_t block_read(Ctx *ctx, Blkno blkno, void *buf, size_t count, Off off)
 {
     count = MAX(0, MIN(count, ctx_geo(ctx)->block_size - off));
     void const *block = block_get(ctx, blkno);
@@ -197,7 +197,7 @@ ssize_t block_read(Ctx *ctx, Blkno blkno, void *buf, size_t count, Off off)
     return count;
 }
 
-Geo geo_from_mbr(MBR const *mbr)
+static Geo geo_from_mbr(MBR const *mbr)
 {
     Geo geo = {
         .bitmap_start = 1,
@@ -330,7 +330,7 @@ static Ctx ctx_open(Fs *fs)
     };
 }
 
-Errno ctx_close(Ctx *ctx)
+static Errno ctx_close(Ctx *ctx)
 {
     return ctx->eno;
 }
@@ -346,7 +346,7 @@ static void block_free(Ctx *ctx, Blkno blkno)
     bitmap[byte_index] &= ~(1 << bit_index);
 }
 
-Errno ctx_abandon(Ctx *ctx)
+static Errno ctx_abandon(Ctx *ctx)
 {
     Errno eno = ctx_close(ctx);
     if (!eno) {
@@ -356,7 +356,7 @@ Errno ctx_abandon(Ctx *ctx)
     return eno;
 }
 
-Errno ctx_commit(Ctx *ctx)
+static Errno ctx_commit(Ctx *ctx)
 {
     if (ctx->eno) {
         fprintf(stderr, "tried to commit a failed operation\n");
@@ -391,7 +391,7 @@ static blkcnt_t inode_blocks(Ctx *ctx, Inode const *inode)
     return data_blocks(ctx, inode->file_data);
 }
 
-struct timespec timespec_from_thinfs_time(Time time)
+static struct timespec timespec_from_thinfs_time(Time time)
 {
     return (struct timespec) {
         .tv_sec = time.secs,
