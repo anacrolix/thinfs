@@ -776,7 +776,9 @@ static Fd fd_new(Ctx *ctx, Ino ino)
 
 static Ino fd_lookup(Ctx *ctx, Fd fd)
 {
-    return ctx->fs->fds[fd];
+    Ino ino = ctx->fs->fds[fd];
+    if (ino == -1) ctx_set_errno(ctx, EBADF);
+    return ino;
 }
 
 static bool fd_valid(Ctx *ctx, Fd fd)
