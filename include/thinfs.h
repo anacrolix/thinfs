@@ -1,7 +1,8 @@
 #include <sys/stat.h>
-#include <stdbool.h>
 #include <sys/types.h>
 #include <sys/statvfs.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 typedef int ThinfsErrno;
 typedef int ThinfsFd;
@@ -44,3 +45,4 @@ ThinfsFd    thinfs_opendir(Thinfs *, char const *path);
 ThinfsErrno thinfs_readdir(Thinfs *, ThinfsFd, void *data, ThinfsFillDir, off_t);
 ThinfsErrno thinfs_releasedir(Thinfs *, ThinfsFd);
 ThinfsErrno thinfs_utimens(Thinfs *, char const *path, const struct timespec[2]);
+ThinfsErrno thinfs_bmap(Thinfs *, char const *path, size_t blocksize, uint64_t *idx);

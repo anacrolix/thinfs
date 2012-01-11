@@ -211,6 +211,11 @@ int thinfs_fuse_utimens(char const *path, struct timespec const tv[2])
     return -thinfs_utimens(get_fs(), path, tv);
 }
 
+int thinfs_fuse_bmap(char const *path, size_t blocksize, uint64_t *idx)
+{
+    return -thinfs_bmap(get_fs(), path, blocksize, idx);
+}
+
 struct fuse_operations thinfs_fuse_operations = {
     .getattr = thinfs_fuse_getattr,
     .readlink = thinfs_fuse_readlink,
@@ -248,7 +253,7 @@ struct fuse_operations thinfs_fuse_operations = {
     .fgetattr = thinfs_fuse_fgetattr,
     // .lock is for network filesystems
     .utimens = thinfs_fuse_utimens,
-    // .bmap not implemented
+    .bmap = thinfs_fuse_bmap,
     .flag_nullpath_ok = 1,
     // .ioctl not unimplemented
     // .poll: backing device is always ready

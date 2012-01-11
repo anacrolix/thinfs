@@ -1310,3 +1310,12 @@ fail:
     return ctx_abandon(ctx);
 }
 
+ThinfsErrno thinfs_bmap(Thinfs *fs, char const *path, size_t blocksize, uint64_t *idx)
+{
+    Ctx ctx[1] = {ctx_open(fs)};
+    if (blocksize != ctx_geo(ctx)->block_size) abort();
+    Inode *inode = inode_from_path(ctx, path_from_cstr(path));
+    *idx = data_bmap(ctx, inode->file_data, *idx);
+    return ctx_commit(ctx);
+}
+
