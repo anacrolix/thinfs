@@ -260,14 +260,10 @@ static bool inode_valid(Ctx *ctx, Inode const *inode, Ino ino)
 
 static Inode *inode_get(Ctx *ctx, Ino ino)
 {
-    if (!ino_valid(ctx, ino)) return NULL;
+    if (ino == -1) return NULL;
     Inode *inode = block_get(ctx, ino);
     if (!inode) return NULL;
-    if (!inode_valid(ctx, inode, ino)) {
-        fprintf(stderr, "inode %" PRIINO " is corrupted\n", ino);
-        ctx_set_errno(ctx, EIO);
-        return NULL;
-    }
+    if (!inode_valid(ctx, inode, ino)) abort();
     return inode;
 }
 
@@ -314,6 +310,7 @@ static Inode *inode_new(Ctx *ctx, mode_t mode, dev_t rdev, uid_t uid, gid_t gid)
         .atime = ctx_time(ctx),
         .mtime = ctx_time(ctx),
         .ctime = ctx_time(ctx),
+        .xattr = {{.root = -1}},
     };
     inode_ref(ctx, inode);
     return inode;
@@ -372,17 +369,12 @@ static blkcnt_t data_blocks(Ctx *ctx, Data const *data)
             return 0;
         if (depth == 0)
             return 1;
-        if (!ino_valid(ctx, blkno)) abort();
         Blkno const *indirect = block_get(ctx, blkno);
         blkcnt_t blocks = 1;
         for (int i = 0; i < ctx->fs->geo->indirect_density; ++i)
             blocks += recurse(indirect[i], depth - 1);
         return blocks;
     }
-    if (data->root == -1)
-        return 0;
-    if (data->depth == 1)
-        return 1;
     return recurse(data->root, data->depth - 1);
 }
 
@@ -848,7 +840,7 @@ bool thinfs_mkfs(int fd)
     *(Inode *)(buf + geo.block_size * geo.bitmap_blocks) = (Inode) {
         .ino = geo.data_start,
         .nlink = 2,
-        .mode = S_IFDIR|0755,
+        .mode = S_IFDIR|0777,
         .file_data = {{.root = -1}},
         .atime = time,
         .mtime = time,

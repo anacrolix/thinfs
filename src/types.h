@@ -19,17 +19,17 @@ typedef struct {
 } MBR;
 
 typedef struct {
+    uint64_t block_size;
+    off_t entry_size;
+    Blkno entries_per_block;
+    Blkno indirect_density;
     uint64_t bitmap_start;
     Blkno bitmap_blocks;
     uint64_t data_start;
     Blkno data_blocks;
-    uint64_t block_size;
     uint64_t bitmap_density;
     uint64_t block_count;
     long page_size;
-    Blkno entries_per_block;
-    off_t entry_size;
-    Blkno indirect_density;
 } Geo;
 
 typedef struct {
@@ -63,6 +63,7 @@ typedef struct {
     Time atime;
     Time mtime;
     Time ctime;
+    Data xattr[1];
 } Inode;
 
 typedef Inode Dir;
