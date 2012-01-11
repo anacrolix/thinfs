@@ -62,7 +62,14 @@ int main(int argc, char *argv[])
         fprintf(stderr, "no device path specified\n");
         return 2;
     }
+    char const fsname_arg_prefix[] = "-ofsname=";
+    char fsname_arg[sizeof fsname_arg_prefix + strlen(fs_dev_path)];
+    strcpy(fsname_arg, fsname_arg_prefix);
+    strcat(fsname_arg, fs_dev_path);
+    fuse_opt_insert_arg(&fuse_args, 1, fsname_arg);
     fuse_opt_insert_arg(&fuse_args, 1, "-ouse_ino");
+    fuse_opt_insert_arg(&fuse_args, 1, "-s");
+    fuse_opt_insert_arg(&fuse_args, 1, "-osubtype=thinfs");
     Thinfs *fs = thinfs_mount(fs_dev_path);
     if (!fs) {
         fprintf(stderr, "failed to mount device\n");
