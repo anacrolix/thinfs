@@ -7,3 +7,6 @@
  * mark pure functions and check repeat calls to them are optimized
  * truncating a file to increase its length might introduce uninitialized data that exists on partially used blocks
  * there may be a leak in the shortening of the data indirect trees
+ * i believe the bottlenecks are dir_entry_get and data_shorten
+ * implement read/write locking on the various calls
+ * remove nlink modification by file descriptors
