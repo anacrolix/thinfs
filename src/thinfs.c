@@ -36,6 +36,8 @@ struct Thinfs {
     Geo geo[1];
     int devfd;
     Ino fds[MAX_FDS];
+    size_t lastbit;
+    Fd last_fd;
 };
 
 typedef struct {
@@ -272,9 +274,12 @@ static Inode *inode_get(Ctx *ctx, Ino ino)
 static Blkno block_alloc(Ctx *ctx)
 {
     char *bitmap = bitmap_get(ctx);
-    for (size_t bit = 0; bit < ctx_geo(ctx)->data_blocks; ++bit) {
+    size_t startbit = ctx->fs->lastbit + 1;
+    for (size_t index = 0; index < ctx_geo(ctx)->data_blocks; ++index) {
+        size_t bit = (startbit + index) % ctx_geo(ctx)->data_blocks;
         if (!((bitmap[bit / CHAR_BIT] >> (bit % CHAR_BIT)) & 1)) {
             bitmap[bit / CHAR_BIT] |= 1 << (bit % CHAR_BIT);
+            ctx->fs->lastbit = bit;
             return ctx_geo(ctx)->data_start + bit;
         }
     }
@@ -721,10 +726,13 @@ static Inode *inode_from_path(Ctx *ctx, Path path)
 
 static Fd fd_new(Ctx *ctx, Ino ino)
 {
-    for (Fd fd = 0; fd < MAX_FDS; ++fd) {
+    if (ino == -1) return -1;
+    for (Fd base_fd = 0; base_fd < MAX_FDS; ++base_fd) {
+        Fd fd = (ctx->fs->last_fd + 1 + base_fd) % MAX_FDS;
         if (ctx->fs->fds[fd] == -1) {
             ctx->fs->fds[fd] = ino;
             inode_ref(ctx, inode_get(ctx, ino));
+            ctx->fs->last_fd = fd;
             return fd;
         }
     }
