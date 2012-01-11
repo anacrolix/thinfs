@@ -1,27 +1,24 @@
-set -eu
+set -e
 
-CFLAGS='-Werror-implicit-function-declaration -Wall -g -std=gnu1x -fplan9-extensions'
+CC="${CC:-gcc}"
+CFLAGS="-Werror-implicit-function-declaration -Wall -std=c99 -D_GNU_SOURCE $CFLAGS"
 
-rm -f thinfs.o
-rm -f mount.thinfs
-rm -f mkfs.thinfs
+rm -f thinfs.o mount.thinfs mkfs.thinfs
 
-gcc -c thinfs.c `pkg-config --cflags glib-2.0` -I../include -D_GNU_SOURCE $CFLAGS
+"$CC" -c thinfs.c -I../include $CFLAGS
 
-gcc \
+"$CC" \
     -o mount.thinfs \
-    `pkg-config fuse --cflags` \
-    -I../include -D_GNU_SOURCE -DFUSE_USE_VERSION=28  \
+    `pkg-config --cflags fuse` \
+    -I../include -DFUSE_USE_VERSION=28 \
     $CFLAGS \
     mount.thinfs.c thinfs_fuse.c thinfs.o \
-    `pkg-config --libs fuse glib-2.0`
+    `pkg-config --libs fuse`
 
-rm -f mkfs.thinfs
-
-gcc \
+"$CC" \
     -o mkfs.thinfs \
-    -I../include -D_GNU_SOURCE \
+    -I../include \
     $CFLAGS \
     mkfs.thinfs.c thinfs.o \
-    -lrt `pkg-config --libs glib-2.0`
+    -lrt
 
