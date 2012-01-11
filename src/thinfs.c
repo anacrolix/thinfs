@@ -245,13 +245,6 @@ failed:
     return NULL;
 }
 
-void thinfs_unmount(Thinfs *fs)
-{
-    munmap(fs->devbuf, fs->geo->block_count * fs->geo->block_size);
-    close(fs->devfd);
-    free(fs);
-}
-
 static bool inode_valid(Ctx *ctx, Inode const *inode, Ino ino)
 {
     if (inode->ino != ino) return false;
@@ -417,8 +410,7 @@ static Blkno data_bmap(Ctx *ctx, Data *data, Blkno index)
     return recurse(data->root, data->depth - 1, index);
 }
 
-// return number of bytes read, or -1 on error
-static size_t data_read(Ctx *ctx, Data const *data, void *buf, size_t count, Off off)
+static ssize_t data_read(Ctx *ctx, Data const *data, void *buf, size_t count, Off off)
 {
     void recurse(Blkno blkno, Depth depth, void *buf, size_t count, Off off) {
         if (blkno == -1) {
@@ -444,11 +436,10 @@ static size_t data_read(Ctx *ctx, Data const *data, void *buf, size_t count, Off
         }
     }
     count = MIN(count, MAX(data->size - off, 0));
-    uint64_t treecap = depth_capacity_bytes(ctx, data->depth);
+    Off treecap = depth_capacity_bytes(ctx, data->depth);
     uint64_t treecnt = MIN(count, MAX(treecap - off, 0));
-    recurse(data->root, data->depth - 1, buf, treecnt, off);
-    if (count > treecnt)
-        memset(buf + treecnt, 0, count - treecnt);
+    if (treecnt) recurse(data->root, data->depth - 1, buf, treecnt, off);
+    if (count > treecnt) memset(buf + treecnt, 0, count - treecnt);
     return count;
 }
 
@@ -487,7 +478,7 @@ static void data_shorten(Ctx *ctx, Data *data, Off len)
         }
         return blkno;
     }
-    data->root = recurse(data->root, data->depth - 1, len);
+    data->root = recurse(data->root, data->depth - 1, MIN(len, depth_capacity_bytes(ctx, data->depth)));
     while (data->depth && depth_capacity_bytes(ctx, data->depth - 1) >= len) {
         if (data->root != -1) {
             Blkno *indirect = block_get(ctx, data->root);
@@ -518,13 +509,30 @@ static void inode_unref(Ctx *ctx, Inode *inode)
     if (inode->nlink < inode_nlink_min(inode)) abort();
     if (inode->nlink != inode_nlink_min(inode)) return;
     if (inode_is_dir(inode) && !dir_is_empty(inode)) abort();
-    data_truncate(ctx, inode->file_data, 0);
+    data_shorten(ctx, inode->file_data, 0);
     block_free(ctx, inode->ino);
 }
 
-static size_t data_write(Ctx *ctx, Data *data, void const *buf, size_t count, Off off)
+void thinfs_unmount(Thinfs *fs)
 {
-    if (!data_lengthen(ctx, data, off + count)) return 0;
+    Ctx ctx = ctx_open(fs);
+    for (Fd fd = 0; fd < MAX_FDS; ++fd) {
+        if (fs->fds[fd] != -1) {
+            inode_unref(&ctx, inode_get(&ctx, fs->fds[fd]));
+            fs->fds[fd] = -1;
+        }
+    }
+    ctx_commit(&ctx);
+    munmap(fs->devbuf, fs->geo->block_count * fs->geo->block_size);
+    close(fs->devfd);
+    free(fs);
+}
+
+static ssize_t data_write(Ctx *ctx, Data *data, void const *buf, size_t count, Off off)
+{
+    if (count == 0) return 0;
+    if (!data_lengthen(ctx, data, off + count)) return -1;
+    size_t blksize = ctx_geo(ctx)->block_size;
     size_t recurse(Blkno blkno, Depth depth, void const *buf, size_t count, Off off) {
         if (depth == 0) {
             void *block = block_get(ctx, blkno);
@@ -557,6 +565,7 @@ static size_t data_write(Ctx *ctx, Data *data, void const *buf, size_t count, Of
         return nwrite;
     }
     size_t nwrite = recurse(data->root, data->depth - 1, buf, count, off);
+    if (nwrite == 0) return -1;
     data->size = MAX(data->size, off + nwrite);
     return nwrite;
 }
@@ -564,21 +573,6 @@ static size_t data_write(Ctx *ctx, Data *data, void const *buf, size_t count, Of
 static ssize_t inode_read(Ctx *ctx, Inode const *inode, void *buf, size_t count, Off off)
 {
     return data_read(ctx, inode->file_data, buf, count, off);
-}
-
-static ssize_t inode_write(Ctx *ctx, Inode *inode, void const *buf, size_t count, Off off)
-{
-    size_t nwrite = data_write(ctx, inode_file_data(inode), buf, count, off);
-    if (nwrite > 0) {
-        inode->ctime = ctx_time(ctx);
-        inode->mtime = ctx_time(ctx);
-    }
-    return nwrite;
-}
-
-static ssize_t file_write(Ctx *ctx, Inode *inode, void const *buf, size_t count, Off off)
-{
-    return inode_write(ctx, inode, buf, count, off);
 }
 
 static Off inode_size(Ctx *ctx, Inode *inode)
@@ -655,7 +649,7 @@ static Off dir_add(Ctx *ctx, Inode *dir, Path name, Ino ino)
     memcpy(entry->name, name.s, name.n);
     entry->name[name.n] = '\0';
     size_t written = data_write(ctx, inode_file_data(dir), entry, entry_size, entries * entry_size);
-    if (written == 0) return -1;
+    if (written == -1) return -1;
     if (written != entry_size) abort();
     return entries;
 }
@@ -977,9 +971,18 @@ fail:
 ssize_t thinfs_pwrite(Thinfs *fs, ThinfsFd fd, void const *buf, size_t count, off_t off)
 {
     Ctx ctx[1] = {ctx_open(fs)};
-    ssize_t written = file_write(ctx, inode_get(ctx, fd_lookup(ctx, fd)), buf, count, off);
-    if (written == -1) return -ctx_abandon(ctx);
+    Inode *inode = inode_get(ctx, fd_lookup(ctx, fd));
+    if (!inode) goto fail;
+    ssize_t written = data_write(ctx, inode->file_data, buf, count, off);
+    if (written == -1) goto fail;
+    if (written > 0) {
+        inode->ctime = ctx_time(ctx);
+        inode->mtime = ctx_time(ctx);
+    }
+    ctx_commit(ctx);
     return written;
+fail:
+    return -ctx_abandon(ctx);
 }
 
 ThinfsErrno thinfs_unlink(Thinfs *fs, char const *path)
