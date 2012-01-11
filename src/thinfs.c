@@ -1,7 +1,6 @@
 #include "thinfs.h"
 #include "types.h"
 #include <assert.h>
-#include <glib.h>
 #include <sys/mman.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -43,9 +42,6 @@ typedef struct {
     Thinfs *fs;
     ThinfsErrno eno;
     Time time;
-    //~ GTree *dirty;
-    //~ Fd fd;
-    //~ Ino fd_ino;
 } Ctx;
 
 typedef struct {
@@ -318,14 +314,7 @@ static Inode *inode_new(Ctx *ctx, mode_t mode, dev_t rdev, uid_t uid, gid_t gid)
     return inode;
 }
 
-_Static_assert(sizeof(gconstpointer) >= sizeof(Blkno), "Blkno too large to be GTree key");
-
-//~ static gint ctx_dirty_compare_data(gconstpointer a, gconstpointer b, gpointer data)
-//~ {
-    //~ return (Blkno)a - (Blkno)b;
-//~ }
-
-Ctx ctx_open(Fs *fs)
+static Ctx ctx_open(Fs *fs)
 {
     return (Ctx) {
         .fs = fs,
@@ -333,33 +322,11 @@ Ctx ctx_open(Fs *fs)
             .secs = -1,
             .nanos = -1,
         },
-        //~ .dirty = g_tree_new_full(ctx_dirty_compare_data, NULL, NULL, free),
-        //~ .fd = -1,
-        //~ .fd_ino = -1,
     };
 }
 
 Errno ctx_close(Ctx *ctx)
 {
-    //~ Fs *fs = (Fs *)ctx->fs;
-    if (!ctx->eno) {
-        //~ if (ctx->fd != -1) {
-            //~ Ino *ino = &fs->fds[ctx->fd];
-            //~ if (*ino != -1) inode_unref(ctx, inode_get(ctx, *ino));
-            //~ *ino = ctx->fd_ino;
-        //~ }
-        //~ size_t block_size = ctx_geo(ctx)->block_size;
-        //~ gboolean func(gpointer key, gpointer value, gpointer data) {
-            //~ Blkno blkno = (Blkno)key;
-            //~ if (block_size != pwrite(ctx->fs->devfd, value, block_size, blkno * block_size)) {
-                //~ perror("pwrite");
-                //~ abort();
-            //~ }
-            //~ return FALSE;
-        //~ }
-        //~ g_tree_foreach(ctx->dirty, func, NULL);
-    }
-    //~ g_tree_destroy(ctx->dirty);
     return ctx->eno;
 }
 
