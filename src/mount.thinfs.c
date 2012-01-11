@@ -2,23 +2,59 @@
 #include "thinfs.h"
 #include <fuse.h>
 #include <fuse_opt.h>
+#include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static void print_usage()
+{
+    fprintf(stderr,
+"\n"
+"thinfs-0.1\n"
+"Copyright (C) 2012 Matt Joiner <anacrolix@gmail.com>\n"
+"\n"
+"Usage: %s <device|image_file> <mountpoint>\n"
+"\n"
+            , program_invocation_short_name);
+    char *argv[] = {program_invocation_name, "-ho", NULL};
+    fuse_main(2, argv, NULL, NULL);
+}
+
+enum {
+    KEY_HELP,
+};
 
 int fuse_opt_proc(void *data, const char *arg, int key, struct fuse_args *outargs)
 {
     char const **fs_dev_path = data;
-    if (key == FUSE_OPT_KEY_NONOPT && !*fs_dev_path) {
-        *fs_dev_path = arg;
-        return 0;
+    switch (key) {
+        case FUSE_OPT_KEY_NONOPT:
+        if (!*fs_dev_path) {
+            *fs_dev_path = arg;
+            return 0;
+        }
+        return 1;
+        case KEY_HELP:
+        print_usage();
+        exit(0);
+        return -1;
+        default:
+        return 1;
     }
-    return 1;
 }
 
 int main(int argc, char *argv[])
 {
     struct fuse_args fuse_args = FUSE_ARGS_INIT(argc, argv);
     char const *fs_dev_path = NULL;
-    if (0 != fuse_opt_parse(&fuse_args, &fs_dev_path, NULL, fuse_opt_proc)) {
+    // these options are hooked to replace fuse's
+    struct fuse_opt const fuse_opts[] = {
+        FUSE_OPT_KEY("-h", KEY_HELP),
+        FUSE_OPT_KEY("--help", KEY_HELP),
+        FUSE_OPT_END,
+    };
+    if (0 != fuse_opt_parse(&fuse_args, &fs_dev_path, fuse_opts, fuse_opt_proc)) {
         fprintf(stderr, "error parsing fuse opts\n");
         return 2;
     }
