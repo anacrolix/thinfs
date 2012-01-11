@@ -84,7 +84,7 @@ static int thinfs_fuse_open(char const *path, struct fuse_file_info *ffi)
     ThinfsFd fd = thinfs_open(get_fs(), path);
     if (fd < 0) return fd;
     ffi->fh = fd + 1;
-    ffi->direct_io = 1;
+    //~ ffi->direct_io = 1;
     return 0;
 }
 
@@ -143,7 +143,7 @@ int thinfs_fuse_opendir(char const *path, struct fuse_file_info *ffi)
     ThinfsFd fd = thinfs_opendir(get_fs(), path);
     if (fd < 0) return fd;
     ffi->fh = fd + 1;
-    ffi->direct_io = 1;
+    //~ ffi->direct_io = 1;
     return 0;
 }
 
@@ -192,7 +192,7 @@ int thinfs_fuse_create(char const *path, mode_t mode, struct fuse_file_info *ffi
     ThinfsFd fd = thinfs_create(get_fs(), path, mode, get_uid(), get_gid());
     if (fd < 0) return fd;
     ffi->fh = fd + 1;
-    ffi->direct_io = 1;
+    //~ ffi->direct_io = 1;
     return 0;
 }
 
