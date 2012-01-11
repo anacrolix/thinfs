@@ -1141,9 +1141,11 @@ ThinfsErrno thinfs_statvfs(Thinfs *fs, struct statvfs *buf)
 ThinfsErrno thinfs_flush(Thinfs *fs, ThinfsFd fd)
 {
     Ctx ctx[1] = {ctx_open(fs)};
-    if (fd_valid(ctx, fd))
-        return ctx_commit(ctx);
-    return ctx_abandon(ctx);
+    if (!fd_valid(ctx, fd)) {
+        ctx_set_errno(ctx, EBADF);
+        return ctx_abandon(ctx);
+    }
+    return ctx_commit(ctx);
 }
 
 ThinfsErrno thinfs_fsync(Thinfs *fs, ThinfsFd fd, int dataonly)
