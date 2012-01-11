@@ -449,8 +449,14 @@ static bool data_lengthen(Ctx *ctx, Data *data, Off len)
         Blkno new_root = block_alloc(ctx);
         if (new_root == -1) return false;
         Blkno *indirect = block_get(ctx, new_root);
-        memset(indirect, -1, ctx_geo(ctx)->block_size);
-        *indirect = data->root;
+        if (data->depth == 0) {
+            assert(data->root == -1);
+            memset(indirect, 0, ctx_geo(ctx)->block_size);
+        } else {
+            memset(indirect, -1 , ctx_geo(ctx)->block_size);
+            *indirect = data->root;
+        }
+        data->blocks++;
         data->root = new_root;
         data->depth++;
     }
@@ -462,7 +468,12 @@ static void data_shorten(Ctx *ctx, Data *data, Off len)
     Blkno recurse(Blkno blkno, Depth depth, Off len) {
         if (blkno == -1) return -1;
         if (!ino_valid(ctx, blkno)) abort();
-        if (depth > 0) {
+        if (depth == 0) {
+            if (len) {
+                void *block = block_get(ctx, blkno);
+                memset(block + len, 0, ctx_geo(ctx)->block_size - len);
+            }
+        } else {
             Blkno *indirect = block_get(ctx, blkno);
             Blkno *indirect_end = indirect + ctx_geo(ctx)->indirect_density;
             indirect += len / depth_capacity_bytes(ctx, depth);
@@ -474,6 +485,7 @@ static void data_shorten(Ctx *ctx, Data *data, Off len)
         }
         if (len == 0) {
             block_free(ctx, blkno);
+            data->blocks--;
             blkno = -1;
         }
         return blkno;
@@ -484,6 +496,7 @@ static void data_shorten(Ctx *ctx, Data *data, Off len)
             Blkno *indirect = block_get(ctx, data->root);
             Blkno new_root = indirect[0];
             block_free(ctx, data->root);
+            data->blocks--;
             data->root = new_root;
         }
         data->depth--;
@@ -545,15 +558,20 @@ static ssize_t data_write(Ctx *ctx, Data *data, void const *buf, size_t count, O
         off %= childcap;
         ssize_t nwrite = 0;
         while (count != 0) {
+            Off childcnt = MIN(count, childcap - off);
             if (*indirect == -1) {
                 *indirect = block_alloc(ctx);
                 if (*indirect == -1) return nwrite;
-                if (depth > 1) {
-                    void *block = block_get(ctx, *indirect);
-                    memset(block, -1, ctx_geo(ctx)->block_size);
+                void *block = block_get(ctx, *indirect);
+                data->blocks++;
+                if (depth == 1) {
+                    if (childcnt != blksize) {
+                        memset(block, 0, blksize);
+                    }
+                } else {
+                    memset(block, -1, blksize);
                 }
             }
-            Off childcnt = MIN(count, childcap - off);
             size_t childret = recurse(*indirect, depth - 1, buf, childcnt, off);
             nwrite += childret;
             if (childret != childcnt) return nwrite;
@@ -782,7 +800,7 @@ static struct stat stat_from_inode(Ctx *ctx, Inode const *inode)
         .st_rdev = inode->rdev,
         .st_size = inode->file_data->size,
         .st_blksize = ctx_geo(ctx)->block_size,
-        .st_blocks = inode_blocks(ctx, inode) * ctx_geo(ctx)->block_size / 512,
+        .st_blocks = inode->file_data->blocks * ctx_geo(ctx)->block_size / 512,
         .st_atim = timespec_from_thinfs_time(inode->atime),
         .st_mtim = timespec_from_thinfs_time(inode->mtime),
         .st_ctim = timespec_from_thinfs_time(inode->ctime),

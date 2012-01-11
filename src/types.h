@@ -42,6 +42,7 @@ typedef struct {
     Blkno root;
     uint64_t size;
     Depth depth;
+    uint32_t blocks;
 } Data;
 
 typedef struct {
