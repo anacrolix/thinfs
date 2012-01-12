@@ -38,6 +38,7 @@ struct Thinfs {
     Ino fds[MAX_FDS];
     size_t lastbit;
     Fd last_fd;
+    size_t free_blocks;
 };
 
 typedef struct {
@@ -170,16 +171,16 @@ static bool blkno_valid(Ctx *ctx, Blkno blkno)
     return 0 <= blkno && blkno < ctx_geo(ctx)->block_count;
 }
 
-static void *bitmap_get(Ctx *ctx)
+static void *bitmap_get(Fs *fs)
 {
-    return ctx->fs->devbuf + ctx_geo(ctx)->bitmap_start * ctx_geo(ctx)->block_size;
+    return fs->devbuf + fs->geo->bitmap_start * fs->geo->block_size;
 }
 
 static bool bitmap_isset(Ctx *ctx, Blkno blkno)
 {
     blkno -= ctx_geo(ctx)->data_start;
     if (!(0 <= blkno && blkno < ctx_geo(ctx)->data_blocks)) abort();
-    return (((char *)bitmap_get(ctx))[blkno / CHAR_BIT] >> (blkno % CHAR_BIT)) & 1;
+    return (((char *)bitmap_get(ctx->fs))[blkno / CHAR_BIT] >> (blkno % CHAR_BIT)) & 1;
 }
 
 static void *block_get(Ctx *ctx, Blkno blkno)
@@ -221,30 +222,6 @@ static Geo geo_from_mbr(MBR const *mbr)
     return geo;
 }
 
-Thinfs *thinfs_mount(char const *path)
-{
-    Thinfs *fs = malloc(sizeof *fs);
-    memset(fs->fds, -1, sizeof fs->fds);
-    fs->devfd = open(path, O_RDWR|O_LARGEFILE);
-    if (fs->devfd == -1) {
-        perror("open");
-        goto failed;
-    }
-    long pagesize = sysconf(_SC_PAGESIZE);
-    if (pagesize == -1) {
-        perror("sysconf");
-        goto failed;
-    }
-    MBR *mbr = mmap(NULL, pagesize, PROT_READ, MAP_SHARED, fs->devfd, 0);
-    *fs->geo = geo_from_mbr(mbr);
-    munmap(mbr, pagesize);
-    fs->devbuf = mmap(NULL, fs->geo->block_size * fs->geo->block_count, PROT_READ|PROT_WRITE, MAP_SHARED, fs->devfd, 0);
-    return fs;
-failed:
-    thinfs_unmount(fs);
-    return NULL;
-}
-
 static bool inode_valid(Ctx *ctx, Inode const *inode, Ino ino)
 {
     if (inode->ino != ino) return false;
@@ -262,18 +239,22 @@ static Inode *inode_get(Ctx *ctx, Ino ino)
 
 static Blkno block_alloc(Ctx *ctx)
 {
-    char *bitmap = bitmap_get(ctx);
+    if (!ctx->fs->free_blocks) {
+        ctx_set_errno(ctx, ENOSPC);
+        return -1;
+    }
+    char *bitmap = bitmap_get(ctx->fs);
     size_t startbit = ctx->fs->lastbit + 1;
     for (size_t index = 0; index < ctx_geo(ctx)->data_blocks; ++index) {
         size_t bit = (startbit + index) % ctx_geo(ctx)->data_blocks;
         if (!((bitmap[bit / CHAR_BIT] >> (bit % CHAR_BIT)) & 1)) {
             bitmap[bit / CHAR_BIT] |= 1 << (bit % CHAR_BIT);
             ctx->fs->lastbit = bit;
+            ctx->fs->free_blocks--;
             return ctx_geo(ctx)->data_start + bit;
         }
     }
-    ctx_set_errno(ctx, ENOSPC);
-    return -1;
+    abort();
 }
 
 static int inode_nlink_min(Inode *inode)
@@ -331,9 +312,10 @@ static void block_free(Ctx *ctx, Blkno blkno)
     if (!(0 <= blkno && blkno < ctx_geo(ctx)->data_blocks)) abort();
     size_t byte_index = blkno / CHAR_BIT;
     int bit_index = blkno % CHAR_BIT;
-    char *bitmap = bitmap_get(ctx);
+    char *bitmap = bitmap_get(ctx->fs);
     if (!((bitmap[byte_index] >> bit_index) & 1)) abort();
     bitmap[byte_index] &= ~(1 << bit_index);
+    ctx->fs->free_blocks++;
 }
 
 static Errno ctx_abandon(Ctx *ctx)
@@ -532,7 +514,7 @@ void thinfs_unmount(Thinfs *fs)
     for (Fd fd = 0; fd < MAX_FDS; ++fd) {
         if (fs->fds[fd] != -1) {
             inode_unref(&ctx, inode_get(&ctx, fs->fds[fd]));
-            fs->fds[fd] = -1;
+            //fs->fds[fd] = -1;
         }
     }
     ctx_commit(&ctx);
@@ -1170,23 +1152,20 @@ static uintmax_t count_set_bits(void const *buf_, uintmax_t bits)
     return count;
 }
 
-static Blkno bitmap_count_used(Ctx *ctx)
+static Blkno bitmap_count_used(Fs *fs)
 {
-    return count_set_bits(bitmap_get(ctx), ctx_geo(ctx)->data_blocks);
+    return count_set_bits(bitmap_get(fs), fs->geo->data_blocks);
 }
 
 ThinfsErrno thinfs_statvfs(Thinfs *fs, struct statvfs *buf)
 {
     Ctx ctx[1] = {ctx_open(fs)};
-    Blkno used_count = bitmap_count_used(ctx);
-    size_t block_size = ctx_geo(ctx)->block_size;
-    Blkno data_blocks = ctx_geo(ctx)->data_blocks;
     *buf = (struct statvfs) {
-        .f_bsize = block_size,
-        .f_frsize = block_size,
-        .f_blocks = data_blocks,
-        .f_bfree = data_blocks - used_count,
-        .f_bavail = data_blocks - used_count,
+        .f_bsize = ctx_geo(ctx)->block_size,
+        .f_frsize = ctx_geo(ctx)->block_size,
+        .f_blocks = ctx_geo(ctx)->data_blocks,
+        .f_bfree = fs->free_blocks,
+        .f_bavail = fs->free_blocks,
         .f_namemax = NAME_MAX,
     };
     return ctx_commit(ctx);
@@ -1340,5 +1319,32 @@ ThinfsErrno thinfs_bmap(Thinfs *fs, char const *path, size_t blocksize, uint64_t
     Inode *inode = inode_from_path(ctx, path_from_cstr(path));
     *idx = data_bmap(ctx, inode->file_data, *idx);
     return ctx_commit(ctx);
+}
+
+Thinfs *thinfs_mount(char const *path)
+{
+    int fd = open(path, O_RDWR);
+    if (fd == -1) {
+        perror("open");
+        return NULL;
+    }
+    long pagesize = sysconf(_SC_PAGESIZE);
+    MBR *mbr = mmap(NULL, pagesize, PROT_READ, MAP_SHARED, fd, 0);
+    Geo geo = geo_from_mbr(mbr);
+    munmap(mbr, pagesize);
+    Thinfs *fs = malloc(sizeof *fs);
+    *fs = (Thinfs) {
+        .devbuf = mmap(NULL, geo.block_size * geo.block_count, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0),
+        .geo = {geo},
+        .devfd = fd,
+        .lastbit = 0,
+        .last_fd = 0,
+        .free_blocks = -1,
+    };
+    memset(fs->fds, -1, sizeof fs->fds);
+    Ctx ctx[1] = {ctx_open(fs)};
+    fs->free_blocks = ctx_geo(ctx)->data_blocks - bitmap_count_used(ctx->fs);
+    ctx_commit(ctx);
+    return fs;
 }
 
