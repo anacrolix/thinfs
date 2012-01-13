@@ -2,6 +2,7 @@
 #include "types.h"
 #include <assert.h>
 #include <sys/mman.h>
+#include <sys/types.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -843,37 +844,32 @@ done:
 
 bool thinfs_mkfs(int fd)
 {
-    struct stat stat[1];
-    if (fstat(fd, stat)) {
-        perror("fstat");
-        return false;
-    }
     size_t pagesize = sysconf(_SC_PAGESIZE);
     MBR *mbr = mmap(NULL, pagesize, PROT_WRITE, MAP_SHARED, fd, 0);
     mbr->block_size = pagesize;
-    mbr->block_count = stat->st_size / pagesize;
+    mbr->block_count = lseek(fd, 0, SEEK_END) / pagesize;
     Geo geo = geo_from_mbr(mbr);
+    munmap(mbr, pagesize);
     // map from bitmap start, to root inode block
-    char *buf = mmap(NULL, geo.block_size * geo.data_start + 1, PROT_WRITE, MAP_SHARED, fd, pagesize);
+    char *buf = mmap(NULL, geo.block_size * (geo.bitmap_blocks + 1), PROT_WRITE, MAP_SHARED, fd, geo.block_size);
     *buf = 1; // allocate the first inode
     memset(buf + 1, 0, geo.block_size * geo.bitmap_blocks - 1);
     struct timespec ts;
-    if (clock_gettime(CLOCK_REALTIME, &ts)) {
-        perror("clock_gettime");
-        return false;
-    }
+    clock_gettime(CLOCK_REALTIME, &ts);
     Time time = time_from_timespec(ts);
     *(Inode *)(buf + geo.block_size * geo.bitmap_blocks) = (Inode) {
         .ino = geo.data_start,
         .nlink = 2,
         .mode = S_IFDIR|0777,
+        .uid = getuid(),
+        .gid = getgid(),
         .file_data = {{.root = -1}},
         .atime = time,
         .mtime = time,
         .ctime = time,
+        .xattr = {{.root = -1}},
     };
     munmap(buf, geo.block_size * geo.data_start);
-    munmap(mbr, pagesize);
     return true;
 }
 

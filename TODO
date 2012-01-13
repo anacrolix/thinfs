@@ -11,3 +11,4 @@
  * implement read/write locking on the various calls
  * remove nlink modification by file descriptors
  * implement xattr, all the skeleton stuff is in place already
+ * test with block sizes smaller than the system page size
